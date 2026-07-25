@@ -112,6 +112,7 @@ async function testDataSession() {
   const dbg = session.debug();
   assert.ok(Array.isArray(dbg.peers));
   assert.strictEqual(dbg.peers.length, 0);
+  pool.disconnect();
   console.log('  data: shape pass');
 }
 
@@ -149,6 +150,7 @@ async function testDataSessionCreatePeerConnection() {
   assert.strictEqual(capturedConfig.iceTransportPolicy, 'all');
   assert.ok(Array.isArray(capturedConfig.iceServers) && capturedConfig.iceServers.length > 0);
   assert.strictEqual(session.peers.get('b'.repeat(64)).pc, mockPc);
+  pool.disconnect();
   console.log('  data: createPeerConnection factory pass');
 }
 
@@ -359,6 +361,8 @@ async function testCompose() {
   const dm = ww.ensureDM();
   assert.strictEqual(typeof dm.send, 'function');
   assert.strictEqual(ww.ensureDM(), dm, 'ensureDM is idempotent');
+  ww.pool.disconnect();
+  debug.deregister('wireweave');
   console.log('  compose: pass');
 }
 
@@ -617,6 +621,8 @@ async function testComposeFull() {
   assert.strictEqual(typeof ds.disconnect, 'function');
   assert.strictEqual(ww.ensureData(), ds, 'ensureData idempotent');
   assert.strictEqual(typeof ww.ensureVoice, 'function', 'ensureVoice callable');
+  ww.pool.disconnect();
+  debug.deregister('wireweave');
   console.log('  compose full: pass');
 }
 
@@ -1033,27 +1039,38 @@ async function testHealthPersistsAcrossReload() {
 async function testDebugPanelExposesHealth() {
   const relay = createEphemeralRelay({ WebSocketServer, verifyEvent: NostrTools.verifyEvent });
   try {
+    // Read back each pool's OWN _debugKey rather than assuming 'relayPool'/'relayPool2' --
+    // debug.js's registry is a single module-level Map shared across the whole test.js
+    // process, so a pool leaked (never disconnect()'d) by an EARLIER test in this same run
+    // can leave lower-numbered keys already occupied by the time this test constructs its
+    // own pools (relay-pool.js's constructor always picks the lowest FREE key, so it may
+    // legitimately start at 'relayPool5' or higher). The real invariant this test exists to
+    // prove -- two concurrently-alive instances get distinct, correctly-incrementing keys,
+    // and disconnect() deregisters the right one -- holds regardless of which numbers those
+    // happen to be, so assert against the pool's own reported key instead of a hardcoded one.
     const poolA = new RelayPool({ relays: [relay.url], verifyEvent: NostrTools.verifyEvent, WebSocketImpl: WebSocket, publishBudget: false });
-    assert.strictEqual(debug.get('relayPool'), poolA, 'first pool instance registers under the base debug key');
+    assert.strictEqual(debug.get(poolA._debugKey), poolA, 'pool instance registers under its own reported debug key');
 
     // A second concurrent instance must not collide — debug.js's registry
     // is a plain module-level Map (no window-guard), so this is real
     // multi-instance behavior even under Node's no-`window` test env.
     const poolB = new RelayPool({ relays: [relay.url], verifyEvent: NostrTools.verifyEvent, WebSocketImpl: WebSocket, publishBudget: false });
-    assert.strictEqual(debug.get('relayPool2'), poolB, 'second concurrent instance gets a distinct incrementing debug key');
+    assert.notStrictEqual(poolB._debugKey, poolA._debugKey, 'second concurrent instance gets a DISTINCT debug key from the first');
+    assert.strictEqual(debug.get(poolB._debugKey), poolB, 'second concurrent instance registers under its own distinct debug key');
 
     poolA.connect();
     await Promise.race([
       new Promise((res) => { const h = (e) => { if (e.detail.status === 'connected') { poolA.removeEventListener('relay-status', h); res(); } }; poolA.addEventListener('relay-status', h); }),
       timed(TIMEOUT, 'debug-panel-test connect')
     ]);
-    const report = debug.get('relayPool').healthReport();
+    const report = debug.get(poolA._debugKey).healthReport();
     assert.ok(Array.isArray(report) && report.length === 1 && report[0].url === relay.url, 'debug.get(key).healthReport() returns the real live-measured report, the exact call a panel makes');
 
+    const keyA = poolA._debugKey, keyB = poolB._debugKey;
     poolA.disconnect();
-    assert.strictEqual(debug.get('relayPool'), undefined, 'disconnect() deregisters the debug key');
+    assert.strictEqual(debug.get(keyA), undefined, 'disconnect() deregisters the debug key');
     poolB.disconnect();
-    assert.strictEqual(debug.get('relayPool2'), undefined, 'second instance deregisters its own key independently');
+    assert.strictEqual(debug.get(keyB), undefined, 'second instance deregisters its own key independently');
   } finally {
     await relay.close();
   }
