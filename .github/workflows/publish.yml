@@ -44,6 +44,11 @@ jobs:
           npm version "$BASE" --no-git-tag-version --allow-same-version
           npm version patch --no-git-tag-version
 
+      - name: publish
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
       - name: commit + tag
         run: |
           VERSION=$(node -p "require('./package.json').version")
@@ -51,8 +56,3 @@ jobs:
           git commit -m "chore: release v$VERSION [skip-publish]"
           git tag "v$VERSION"
           git push origin main --follow-tags
-
-      - name: publish
-        run: npm publish --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
