@@ -169,17 +169,38 @@ export class VoiceSession extends EventTarget {
     try {
       const roomId = await deriveRoomId(this.serverId, channelName);
       if (epoch !== this._epoch) return;
-      const stream = await this.md.getUserMedia({ audio: { echoCancellation: this.echoCancellation, noiseSuppression: this.noiseSuppression, autoGainControl: this.autoGainControl } });
-      if (epoch !== this._epoch) { stream.getTracks().forEach(t => t.stop()); return; }
+      // No mic (denied permission, no device, or a headless/kiosk browser) must not block
+      // joining voice — downstream code already null-guards localStream throughout (mute
+      // toggle, recording, peer transceivers fall back to recvonly), so a mic-less join is
+      // a supported listen-only mode, not a degraded error state.
+      let stream = null;
+      try {
+        stream = await this.md.getUserMedia({ audio: {
+          echoCancellation: this.echoCancellation, noiseSuppression: this.noiseSuppression, autoGainControl: this.autoGainControl
+        } });
+      } catch (mediaErr) {
+        this._emit('media-warning', { message: 'joined listen-only: ' + mediaErr.message });
+      }
+      if (epoch !== this._epoch) { if (stream) stream.getTracks().forEach(t => t.stop()); return; }
       this.roomId = roomId;
       this.localStream = stream;
       // PTT mode: gate closed at join, caller opens it via setMuted(false)/requestTransmit().
       // Open-mic mode (pttMode=false): start unmuted.
       this.muted = this.pttMode;
-      this.localStream.getAudioTracks().forEach(t => t.enabled = !this.pttMode);
+      if (this.localStream) this.localStream.getAudioTracks().forEach(t => t.enabled = !this.pttMode);
       this.participants.clear();
       this.participants.set('local', { identity: displayName, isSpeaking: false, isMuted: this.pttMode, isLocal: true, hasVideo: false, connectionQuality: 'good' });
-      this._attachAnalyzer('local', this.localStream);
+      // Local speaker-activity detection needs to keep listening even while muted
+      // (VAD mode auto-unmutes ON speech, so it can't rely on the transmit-gated
+      // track to hear that speech in the first place). Clone the raw audio track
+      // — a clone's `enabled` is independent of the original — and keep the clone
+      // always enabled purely for local analysis; it is never sent to peers.
+      if (this.localStream) {
+        const track = this.localStream.getAudioTracks()[0];
+        this._localListenTrack = track ? track.clone() : null;
+        const listenStream = this._localListenTrack ? new MediaStream([this._localListenTrack]) : this.localStream;
+        this._attachAnalyzer('local', listenStream);
+      }
       this.actor.send({ type: 'connected' });
       this._subscribeSignals();
       this._subscribePresence();
@@ -213,6 +234,7 @@ export class VoiceSession extends EventTarget {
     if (this._actx && this._actx.state !== 'closed') { try { this._actx.close(); } catch {} this._actx = null; }
     if (this.cameraStream) { this.cameraStream.getTracks().forEach(t => t.stop()); this.cameraStream = null; }
     if (this.localStream) { this.localStream.getTracks().forEach(t => t.stop()); this.localStream = null; }
+    if (this._localListenTrack) { this._localListenTrack.stop(); this._localListenTrack = null; }
     if (this.roomId) { this.pool.unsubscribe('voice-presence-' + this.roomId); this.pool.unsubscribe('voice-signals-' + this.roomId); }
     this.participants.clear();
     this.roomId = ''; this.channelName = '';
