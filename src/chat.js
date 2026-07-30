@@ -3,8 +3,34 @@ const hexChannelId = async (channelId, serverId) => {
   return Array.from(new Uint8Array(h)).map(b => b.toString(16).padStart(2, '0')).join('');
 };
 
+const countLeadingZeroBits = (hexId) => {
+  let bits = 0;
+  for (let i = 0; i < hexId.length; i++) {
+    const nibble = parseInt(hexId[i], 16);
+    if (nibble === 0) { bits += 4; continue; }
+    bits += Math.clz32(nibble) - 28;
+    break;
+  }
+  return bits;
+};
+
+// NIP-13 proof-of-work: mines a nonce tag so the final event id has at
+// least `difficulty` leading zero bits, entirely client-side (no relay
+// changes required) -- a cheap per-message spam-resistance signal a server
+// can opt into. Bounded by maxIterations so a high difficulty on a slow
+// device degrades to "best effort within budget" rather than hanging.
+const minePow = (getEventHash, template, difficulty, maxIterations = 2_000_000) => {
+  const tags = (template.tags || []).filter((t) => t[0] !== 'nonce');
+  for (let nonce = 0; nonce < maxIterations; nonce++) {
+    const candidate = { ...template, tags: [...tags, ['nonce', String(nonce), String(difficulty)]] };
+    const id = getEventHash(candidate);
+    if (countLeadingZeroBits(id) >= difficulty) return candidate;
+  }
+  return template; // budget exhausted -- send unmined rather than hang forever
+};
+
 export class Chat extends EventTarget {
-  constructor({ relayPool, auth, getChannelContext = () => ({ channelId: null, serverId: '' }), isAdmin = () => false, bans = null, mutes = null }) {
+  constructor({ relayPool, auth, getChannelContext = () => ({ channelId: null, serverId: '' }), isAdmin = () => false, bans = null, mutes = null, getEventHash = null, powDifficulty = 0 }) {
     super();
     if (!relayPool || !auth) throw new Error('Chat: relayPool + auth required');
     this.pool = relayPool; this.auth = auth;
@@ -14,6 +40,11 @@ export class Chat extends EventTarget {
     // personal mute list (NIP-51 kind:10000) -- both optional so tests and
     // callers that don't need moderation can construct Chat without them.
     this.bans = bans; this.mutes = mutes;
+    // Optional NIP-13 PoW: getEventHash comes from nostr-tools (needed to
+    // mine before signing), powDifficulty is opt-in per AGENTS.md's
+    // "no fallback for a feature nobody asked to enable" spirit -- 0 (the
+    // default) skips mining entirely with zero added cost.
+    this.getEventHash = getEventHash; this.powDifficulty = powDifficulty;
     this.activeChannelId = null;
     this.messages = [];
     this.profiles = new Map(); this.fetching = new Set();
@@ -54,7 +85,9 @@ export class Chat extends EventTarget {
     const tags = [['e', chanHex, '', 'root']];
     if (replyTo?.id) tags.push(['e', replyTo.id, '', 'reply']);
     if (announcement) tags.push(['t', 'announcement']);
-    const signed = await this.auth.sign({ kind: 42, created_at: Math.floor(Date.now() / 1000), tags, content: trimmed });
+    let template = { kind: 42, created_at: Math.floor(Date.now() / 1000), tags, content: trimmed, pubkey: this.auth.pubkey };
+    if (this.powDifficulty > 0 && this.getEventHash) template = minePow(this.getEventHash, template, this.powDifficulty);
+    const signed = await this.auth.sign(template);
     this.pool.publish(signed);
     this._addMessage(this._eventToMsg(signed));
   }

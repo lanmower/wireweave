@@ -49,7 +49,8 @@ export const createWireweave = ({
     relayPool: pool, auth,
     getChannelContext: () => ({ channelId: currentChannelId, serverId: servers.currentServerId || '' }),
     isAdmin: (sid) => roles.isAdmin(sid),
-    bans, mutes
+    bans, mutes,
+    getEventHash: nostrTools.getEventHash
   });
 
   const servers = createServers({

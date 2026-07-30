@@ -448,6 +448,38 @@ async function testChatBansAndMutesEnforcement() {
   console.log('  chat bans+mutes enforcement: pass');
 }
 
+// NIP-13 proof-of-work: opt-in per-message mining (powDifficulty > 0) yields
+// a real event id with the requested number of leading zero bits, verified
+// against real nostr-tools getEventHash/finalizeEvent -- not a mock hash.
+// Difficulty 0 (the default) must never mine, so existing callers see zero
+// added cost.
+async function testChatPow() {
+  const auth = newAuth();
+  const pool = mockPool();
+  const serverId = newAuth().pubkey + ':srv-pow';
+  const channelId = 'general';
+
+  const noPow = createChat({ relayPool: pool, auth, getChannelContext: () => ({ channelId, serverId }), getEventHash: NostrTools.getEventHash });
+  await noPow.send('no pow by default');
+  assert.strictEqual(noPow.messages[0].tags.some((t) => t[0] === 'nonce'), false, 'difficulty 0 never mines a nonce tag');
+
+  const withPow = createChat({ relayPool: pool, auth, getChannelContext: () => ({ channelId, serverId }), getEventHash: NostrTools.getEventHash });
+  withPow.powDifficulty = 8; // small enough to mine near-instantly in a test
+  await withPow.send('mined message');
+  const minedEvent = pool.published[pool.published.length - 1];
+  assert.ok(minedEvent.tags.some((t) => t[0] === 'nonce'), 'mined event carries a nonce tag');
+  let leadingZeroBits = 0;
+  for (const ch of minedEvent.id) {
+    const n = parseInt(ch, 16);
+    if (n === 0) { leadingZeroBits += 4; continue; }
+    leadingZeroBits += Math.clz32(n) - 28;
+    break;
+  }
+  assert.ok(leadingZeroBits >= 8, `mined id has >= 8 leading zero bits (got ${leadingZeroBits})`);
+  assert.strictEqual(minedEvent.id, NostrTools.getEventHash(minedEvent), 'mined id is the real hash of the final signed event');
+  console.log('  chat pow: pass');
+}
+
 async function testChannelsMutations() {
   const owner = newAuth();
   const serverId = owner.pubkey + ':srv1';
@@ -1399,6 +1431,7 @@ async function main() {
   await testDM();
   await testChat();
   await testChatBansAndMutesEnforcement();
+  await testChatPow();
   await testChannelsMutations();
   testBansFull();
   testRolesRelay();
