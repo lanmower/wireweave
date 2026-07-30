@@ -4,17 +4,28 @@ const hexChannelId = async (channelId, serverId) => {
 };
 
 export class Chat extends EventTarget {
-  constructor({ relayPool, auth, getChannelContext = () => ({ channelId: null, serverId: '' }), isAdmin = () => false }) {
+  constructor({ relayPool, auth, getChannelContext = () => ({ channelId: null, serverId: '' }), isAdmin = () => false, bans = null, mutes = null }) {
     super();
     if (!relayPool || !auth) throw new Error('Chat: relayPool + auth required');
     this.pool = relayPool; this.auth = auth;
     this.getChannelContext = getChannelContext; this.isAdmin = isAdmin;
+    // Server-enforced ban/timeout check (defense in depth against a
+    // bypassing client, not just a send-time guard) and the user's own
+    // personal mute list (NIP-51 kind:10000) -- both optional so tests and
+    // callers that don't need moderation can construct Chat without them.
+    this.bans = bans; this.mutes = mutes;
     this.activeChannelId = null;
     this.messages = [];
     this.profiles = new Map(); this.fetching = new Set();
     this._sendTimes = [];
     this.rateLimitMax = 5;
     this.rateLimitWindowMs = 10000;
+  }
+
+  _isBlocked(serverId, pubkey) {
+    if (this.bans && (this.bans.isBanned(serverId, pubkey) || this.bans.isTimedOut(serverId, pubkey))) return true;
+    if (this.mutes && this.mutes.isMuted(pubkey)) return true;
+    return false;
   }
 
   rateLimitRetryAfterMs() {
@@ -27,6 +38,10 @@ export class Chat extends EventTarget {
   async send(content, { announcement = false, replyTo = null } = {}) {
     const { channelId, serverId } = this.getChannelContext();
     if (!this.auth.isLoggedIn() || !channelId) return;
+    if (this.bans && (this.bans.isBanned(serverId, this.auth.pubkey) || this.bans.isTimedOut(serverId, this.auth.pubkey))) {
+      this._emit('send-blocked', { reason: 'banned-or-timed-out' });
+      return;
+    }
     if (announcement && !this.isAdmin(serverId)) return;
     const trimmed = content.trim(); if (!trimmed) return;
     const retryAfter = this.rateLimitRetryAfterMs();
@@ -57,7 +72,7 @@ export class Chat extends EventTarget {
     const collected = [];
     this.pool.subscribe('chat-' + channelId,
       [{ kinds: [42], '#e': [chanHex], limit: 50 }],
-      (ev) => collected.push(this._eventToMsg(ev)),
+      (ev) => { if (!this._isBlocked(serverId, ev.pubkey)) collected.push(this._eventToMsg(ev)); },
       () => {
         collected.sort((a, b) => a.timestamp - b.timestamp);
         this.messages = collected;
@@ -65,7 +80,7 @@ export class Chat extends EventTarget {
       });
     this.pool.subscribe('chat-live-' + channelId,
       [{ kinds: [42], '#e': [chanHex], since: Math.floor(Date.now() / 1000) }],
-      (ev) => this._addMessage(this._eventToMsg(ev)));
+      (ev) => { if (!this._isBlocked(serverId, ev.pubkey)) this._addMessage(this._eventToMsg(ev)); });
   }
 
   async deleteMessage(id) {

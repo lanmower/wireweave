@@ -14,6 +14,7 @@ import { createPages } from './pages.js';
 import { createDM } from './dm.js';
 import { createDataSession } from './data.js';
 import { createReactions } from './reactions.js';
+import { createMutes } from './mutes.js';
 import { register } from './debug.js';
 
 export const createWireweave = ({
@@ -40,12 +41,15 @@ export const createWireweave = ({
   const media = createMedia({ relayPool: pool, auth });
   const channels = createChannels({ relayPool: pool, auth });
   const reactions = createReactions({ relayPool: pool, auth });
+  const mutes = createMutes({ relayPool: pool, auth });
+  mutes.load();
 
   let currentChannelId = null;
   const chat = createChat({
     relayPool: pool, auth,
     getChannelContext: () => ({ channelId: currentChannelId, serverId: servers.currentServerId || '' }),
-    isAdmin: (sid) => roles.isAdmin(sid)
+    isAdmin: (sid) => roles.isAdmin(sid),
+    bans, mutes
   });
 
   const servers = createServers({
@@ -100,7 +104,7 @@ export const createWireweave = ({
   };
 
   const api = {
-    pool, auth, fsm, message, bans, roles, settings, pages, media, channels, servers, chat, reactions,
+    pool, auth, fsm, message, bans, roles, settings, pages, media, channels, servers, chat, reactions, mutes,
     get voice() { return voice; },
     ensureVoice,
     get dm() { return dm; },

@@ -16,5 +16,6 @@ export { Media, createMedia } from './media.js';
 export { DM, createDM } from './dm.js';
 export { Pages, createPages } from './pages.js';
 export { Reactions, createReactions } from './reactions.js';
+export { Mutes, createMutes } from './mutes.js';
 export { createWireweave } from './wireweave.js';
 export * as debug from './debug.js';

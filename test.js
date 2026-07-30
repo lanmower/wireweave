@@ -17,6 +17,7 @@ import { createMedia } from './src/media.js';
 import { createWireweave } from './src/wireweave.js';
 import { createEphemeralRelay } from './src/ephemeral-relay.js';
 import { createReactions } from './src/reactions.js';
+import { createMutes } from './src/mutes.js';
 
 // A mock relay pool: captures published events and lets a test push events back
 // into a named subscription's onEvent. No network — these are deterministic
@@ -396,6 +397,55 @@ async function testChat() {
   await adminChat.deleteMessage('z');
   assert.ok(pool.published.some(e => e.kind === 5 && e.tags?.[0]?.[1] === 'z'));
   console.log('  chat: pass');
+}
+
+// Chat enforcement: a banned/timed-out sender is rejected at send() (defense
+// in depth beyond the UI-level guard), and both server bans and a viewer's
+// own personal mute list filter incoming history/live messages locally.
+async function testChatBansAndMutesEnforcement() {
+  const owner = newAuth();
+  const bannedUser = newAuth();
+  const mutedUser = newAuth();
+  const normalUser = newAuth();
+  const serverId = owner.pubkey + ':srv-enforce';
+  const channelId = 'general';
+  const pool = mockPool();
+
+  const roles = createRoles({ relayPool: pool, auth: owner });
+  const bans = createBans({ relayPool: pool, auth: owner, roles });
+  bans.store.set(serverId, { banned: [bannedUser.pubkey], timeouts: {}, kicked: [], muted: {} });
+
+  // send() rejects when the CURRENT user is banned
+  const bannedChat = createChat({ relayPool: pool, auth: bannedUser, getChannelContext: () => ({ channelId, serverId }), bans });
+  let blockedEmitted = false;
+  bannedChat.addEventListener('send-blocked', () => { blockedEmitted = true; });
+  const beforePublishCount = pool.published.length;
+  await bannedChat.send('should not send');
+  assert.strictEqual(pool.published.length, beforePublishCount, 'banned user cannot publish a chat message');
+  assert.ok(blockedEmitted, 'send-blocked event fires for a banned sender');
+
+  // a normal user's history/live view filters OUT messages from a banned author
+  const viewerMutes = createMutes({ relayPool: pool, auth: normalUser });
+  viewerMutes.muted.add(mutedUser.pubkey);
+  viewerMutes._loaded = true; // skip the relay-load round trip for this synchronous test
+  const viewerChat = createChat({ relayPool: pool, auth: normalUser, getChannelContext: () => ({ channelId, serverId }), bans, mutes: viewerMutes });
+  await viewerChat.loadHistory(channelId);
+  const subId = 'chat-' + channelId;
+  // feed three authors: banned (server-level), muted (personal), normal
+  pool.feed(subId, { id: 'm1', pubkey: bannedUser.pubkey, created_at: 100, tags: [['e', 'irrelevant', '', 'root']], content: 'from banned' });
+  pool.feed(subId, { id: 'm2', pubkey: mutedUser.pubkey, created_at: 101, tags: [['e', 'irrelevant', '', 'root']], content: 'from muted' });
+  pool.feed(subId, { id: 'm3', pubkey: normalUser.pubkey, created_at: 102, tags: [['e', 'irrelevant', '', 'root']], content: 'from normal' });
+  pool.eose(subId);
+  assert.strictEqual(viewerChat.messages.length, 1, 'only the normal-user message survives filtering');
+  assert.strictEqual(viewerChat.messages[0].content, 'from normal');
+
+  // live subscription applies the same filter
+  const liveSubId = 'chat-live-' + channelId;
+  pool.feed(liveSubId, { id: 'm4', pubkey: bannedUser.pubkey, created_at: 200, tags: [['e', 'irrelevant', '', 'root']], content: 'live from banned' });
+  pool.feed(liveSubId, { id: 'm5', pubkey: normalUser.pubkey, created_at: 201, tags: [['e', 'irrelevant', '', 'root']], content: 'live from normal' });
+  assert.strictEqual(viewerChat.messages.length, 2, 'live filter also excludes the banned author');
+  assert.ok(viewerChat.messages.every((m) => m.content !== 'live from banned'));
+  console.log('  chat bans+mutes enforcement: pass');
 }
 
 async function testChannelsMutations() {
@@ -1198,6 +1248,58 @@ async function testBansCannotTargetOwnerOrAdmin() {
   console.log('  bans cannot target owner/admin: pass');
 }
 
+// NIP-51 kind:10000 personal mute list: mute/unmute publish the full list as
+// one replaceable event, and load() restores it from the user's own latest
+// relay-published event (including retrying once auth resolves after a
+// login event, for the boot-time-not-yet-logged-in case).
+async function testMutes() {
+  const user = newAuth();
+  const target1 = newAuth().pubkey;
+  const target2 = newAuth().pubkey;
+  const pool = mockPool();
+  const mutes = createMutes({ relayPool: pool, auth: user });
+
+  await mutes.mute(target1);
+  assert.ok(mutes.isMuted(target1));
+  assert.strictEqual(pool.published.length, 1);
+  assert.strictEqual(pool.published[0].kind, 10000);
+  assert.deepStrictEqual(pool.published[0].tags, [['p', target1]]);
+
+  await mutes.mute(target2);
+  assert.deepStrictEqual(new Set(pool.published[1].tags.map((t) => t[1])), new Set([target1, target2]));
+
+  await mutes.unmute(target1);
+  assert.ok(!mutes.isMuted(target1));
+  assert.ok(mutes.isMuted(target2));
+  assert.deepStrictEqual(pool.published[2].tags, [['p', target2]]);
+
+  // re-muting an already-muted pubkey / unmuting an already-absent one is a
+  // true no-op (no redundant publish)
+  const beforeCount = pool.published.length;
+  await mutes.mute(target2);
+  await mutes.unmute(target1);
+  assert.strictEqual(pool.published.length, beforeCount, 'idempotent mute/unmute does not republish');
+
+  // load() restores from the user's own latest kind:10000 event
+  const fresh = createMutes({ relayPool: pool, auth: user });
+  fresh.load();
+  const subId = 'mutes-' + user.pubkey;
+  pool.feed(subId, { pubkey: user.pubkey, created_at: 500, tags: [['p', target2]], content: '' });
+  assert.ok(fresh.isMuted(target2), 'load() restores the mute list from a relay-published event');
+
+  // boot-before-login case: load() called with no pubkey yet defers until
+  // the 'login' event fires, instead of silently never loading
+  const notYetAuth = newAuth();
+  notYetAuth.pubkey = ''; // simulate pre-login state
+  const deferred = createMutes({ relayPool: pool, auth: notYetAuth });
+  deferred.load();
+  assert.strictEqual(deferred._loaded, false, 'defers _loaded until auth actually resolves');
+  notYetAuth.pubkey = user.pubkey;
+  notYetAuth.dispatchEvent(new CustomEvent('login', { detail: { pubkey: user.pubkey } }));
+  assert.strictEqual(deferred._loaded, true, 'load() retries automatically once login fires');
+  console.log('  mutes: pass');
+}
+
 // NIP-25 kind:7 reactions: publish, last-write-wins aggregation, unreact via
 // kind:5 deletion, and defense against a stale/out-of-order-delivered reply.
 async function testReactions() {
@@ -1296,6 +1398,7 @@ async function main() {
   testIceServerOverrides();
   await testDM();
   await testChat();
+  await testChatBansAndMutesEnforcement();
   await testChannelsMutations();
   testBansFull();
   testRolesRelay();
@@ -1322,6 +1425,7 @@ async function main() {
   await testProfile();
   testBansModerationDepth();
   await testBansCannotTargetOwnerOrAdmin();
+  await testMutes();
   await testReactions();
   await testMessageBusOffline();
   console.log('all pass');
