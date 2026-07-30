@@ -26,9 +26,22 @@ export class Bans extends EventTarget {
     return !!t && t.expiry > Math.floor(Date.now() / 1000);
   }
 
+  // Same protection roles.js already applies to setRole(): a mere admin
+  // (not the owner) can never take a punitive action against the owner or
+  // against another admin — otherwise any admin could ban/timeout/mute the
+  // owner or a co-admin and effectively lock out a higher-privileged user.
+  _assertCanTarget(serverId, targetPubkey) {
+    if (!this.roles) return;
+    if (this.roles.isOwner(serverId)) return;
+    const targetRole = this.roles.getRole(serverId, targetPubkey);
+    if (targetRole === 'owner') throw new Error('Cannot take action against the server owner');
+    if (targetRole === 'admin') throw new Error('Only the owner can take action against another admin');
+  }
+
   async ban(serverId, pubkey) {
     if (!this.auth?.isLoggedIn()) throw new Error('Not logged in');
     if (this.roles && !this.roles.isAdmin(serverId)) throw new Error('Insufficient permissions');
+    this._assertCanTarget(serverId, pubkey);
     const dTag = dtag('ban', serverId, pubkey);
     const signed = await this.auth.sign({
       kind: 30078, created_at: Math.floor(Date.now() / 1000),
@@ -58,6 +71,7 @@ export class Bans extends EventTarget {
   async timeout(serverId, pubkey, minutes) {
     if (!this.auth?.isLoggedIn()) throw new Error('Not logged in');
     if (this.roles && !this.roles.isAdmin(serverId)) throw new Error('Insufficient permissions');
+    this._assertCanTarget(serverId, pubkey);
     const expiry = Math.floor(Date.now() / 1000) + (minutes * 60);
     const dTag = dtag('timeout', serverId, pubkey);
     const signed = await this.auth.sign({
@@ -76,6 +90,7 @@ export class Bans extends EventTarget {
   async clearTimeout(serverId, pubkey) {
     if (!this.auth?.isLoggedIn()) throw new Error('Not logged in');
     if (this.roles && !this.roles.isAdmin(serverId)) throw new Error('Insufficient permissions');
+    this._assertCanTarget(serverId, pubkey);
     const dTag = dtag('timeout', serverId, pubkey);
     const signed = await this.auth.sign({
       kind: 30078, created_at: Math.floor(Date.now() / 1000),
@@ -85,8 +100,10 @@ export class Bans extends EventTarget {
     this.pool.publish(signed);
   }
 
-  async kickFromVoice(pubkey) {
+  async kickFromVoice(serverId, pubkey) {
     if (!this.auth?.isLoggedIn()) throw new Error('Not logged in');
+    if (this.roles && serverId && !this.roles.isAdmin(serverId)) throw new Error('Insufficient permissions');
+    if (serverId) this._assertCanTarget(serverId, pubkey);
     const signed = await this.auth.sign({
       kind: 30078, created_at: Math.floor(Date.now() / 1000),
       tags: [['d', dtag('kick', pubkey)]], content: ''
@@ -100,6 +117,7 @@ export class Bans extends EventTarget {
   async mute(serverId, channelId, pubkey) {
     if (!this.auth?.isLoggedIn()) throw new Error('Not logged in');
     if (this.roles && !this.roles.isMod(serverId)) throw new Error('Insufficient permissions');
+    this._assertCanTarget(serverId, pubkey);
     const dTag = dtag('mute', serverId, channelId, pubkey);
     const signed = await this.auth.sign({
       kind: 30078, created_at: Math.floor(Date.now() / 1000),
