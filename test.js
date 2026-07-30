@@ -18,6 +18,7 @@ import { createWireweave } from './src/wireweave.js';
 import { createEphemeralRelay } from './src/ephemeral-relay.js';
 import { createReactions } from './src/reactions.js';
 import { createMutes } from './src/mutes.js';
+import { createForum } from './src/forum.js';
 
 // A mock relay pool: captures published events and lets a test push events back
 // into a named subscription's onEvent. No network — these are deterministic
@@ -1332,6 +1333,63 @@ async function testMutes() {
   console.log('  mutes: pass');
 }
 
+// Forum: kind:11 thread-root posts scoped to a channel (same hashed-channel-
+// tag discipline as chat.js's kind:42), kind:1111 (NIP-22) replies within a
+// post's own thread, and client-derived replyCount.
+async function testForum() {
+  const author = newAuth();
+  const replier1 = newAuth();
+  const replier2 = newAuth();
+  const serverId = newAuth().pubkey + ':srv-forum';
+  const channelId = 'discussions';
+  const pool = mockPool();
+
+  const forum = createForum({ relayPool: pool, auth: author });
+  const signed = await forum.createPost(channelId, serverId, 'Hello forum', 'first post body');
+  assert.strictEqual(signed.kind, 11);
+  assert.ok(signed.tags.some((t) => t[0] === 'title' && t[1] === 'Hello forum'));
+  assert.strictEqual(pool.published.length, 1);
+
+  let list = forum.listFor(channelId);
+  assert.strictEqual(list.length, 1);
+  assert.strictEqual(list[0].title, 'Hello forum');
+  assert.strictEqual(list[0].replyCount, 0);
+
+  // empty title rejected
+  await assert.rejects(() => forum.createPost(channelId, serverId, '  ', 'x'), /title cannot be empty/);
+
+  // replies from two different users increment replyCount and are ordered oldest-first
+  const forumAsReplier1 = createForum({ relayPool: pool, auth: replier1 });
+  const r1 = await forumAsReplier1.reply(signed.id, author.pubkey, 'first reply');
+  assert.strictEqual(r1.kind, 1111);
+  assert.deepStrictEqual(r1.tags.find((t) => t[0] === 'E'), ['E', signed.id]);
+  assert.deepStrictEqual(r1.tags.find((t) => t[0] === 'K'), ['K', '11']);
+  forum._applyReply(r1); // simulate relay echo reaching the original author's client
+
+  const forumAsReplier2 = createForum({ relayPool: pool, auth: replier2 });
+  await new Promise((r) => setTimeout(r, 5));
+  const r2 = await forumAsReplier2.reply(signed.id, author.pubkey, 'second reply');
+  forum._applyReply(r2);
+
+  list = forum.listFor(channelId);
+  assert.strictEqual(list[0].replyCount, 2, 'replyCount reflects both replies');
+  const replies = forum.repliesFor(signed.id);
+  assert.strictEqual(replies.length, 2);
+  assert.strictEqual(replies[0].content, 'first reply', 'replies ordered oldest-first');
+  assert.strictEqual(replies[1].content, 'second reply');
+
+  // empty reply content rejected
+  await assert.rejects(() => forumAsReplier1.reply(signed.id, author.pubkey, '   '), /Reply cannot be empty/);
+
+  // a second post in the same channel, plus a post in a DIFFERENT channel, don't cross-contaminate
+  await forum.createPost(channelId, serverId, 'Second post', 'body2');
+  assert.strictEqual(forum.listFor(channelId).length, 2, 'two posts in the same channel');
+  await forum.createPost('other-channel', serverId, 'Elsewhere', 'body3');
+  assert.strictEqual(forum.listFor(channelId).length, 2, 'posting to a different channel does not bleed in');
+  assert.strictEqual(forum.listFor('other-channel').length, 1);
+  console.log('  forum: pass');
+}
+
 // NIP-25 kind:7 reactions: publish, last-write-wins aggregation, unreact via
 // kind:5 deletion, and defense against a stale/out-of-order-delivered reply.
 async function testReactions() {
@@ -1459,6 +1517,7 @@ async function main() {
   testBansModerationDepth();
   await testBansCannotTargetOwnerOrAdmin();
   await testMutes();
+  await testForum();
   await testReactions();
   await testMessageBusOffline();
   console.log('all pass');

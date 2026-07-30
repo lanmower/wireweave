@@ -15,6 +15,7 @@ import { createDM } from './dm.js';
 import { createDataSession } from './data.js';
 import { createReactions } from './reactions.js';
 import { createMutes } from './mutes.js';
+import { createForum } from './forum.js';
 import { register } from './debug.js';
 
 export const createWireweave = ({
@@ -43,6 +44,7 @@ export const createWireweave = ({
   const reactions = createReactions({ relayPool: pool, auth });
   const mutes = createMutes({ relayPool: pool, auth });
   mutes.load();
+  const forum = createForum({ relayPool: pool, auth });
 
   let currentChannelId = null;
   const chat = createChat({
@@ -105,7 +107,7 @@ export const createWireweave = ({
   };
 
   const api = {
-    pool, auth, fsm, message, bans, roles, settings, pages, media, channels, servers, chat, reactions, mutes,
+    pool, auth, fsm, message, bans, roles, settings, pages, media, channels, servers, chat, reactions, mutes, forum,
     get voice() { return voice; },
     ensureVoice,
     get dm() { return dm; },
