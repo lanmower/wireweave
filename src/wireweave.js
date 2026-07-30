@@ -13,6 +13,7 @@ import { createMedia } from './media.js';
 import { createPages } from './pages.js';
 import { createDM } from './dm.js';
 import { createDataSession } from './data.js';
+import { createReactions } from './reactions.js';
 import { register } from './debug.js';
 
 export const createWireweave = ({
@@ -38,6 +39,7 @@ export const createWireweave = ({
   const pages = createPages({ relayPool: pool, auth, roles });
   const media = createMedia({ relayPool: pool, auth });
   const channels = createChannels({ relayPool: pool, auth });
+  const reactions = createReactions({ relayPool: pool, auth });
 
   let currentChannelId = null;
   const chat = createChat({
@@ -98,7 +100,7 @@ export const createWireweave = ({
   };
 
   const api = {
-    pool, auth, fsm, message, bans, roles, settings, pages, media, channels, servers, chat,
+    pool, auth, fsm, message, bans, roles, settings, pages, media, channels, servers, chat, reactions,
     get voice() { return voice; },
     ensureVoice,
     get dm() { return dm; },

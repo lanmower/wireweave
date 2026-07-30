@@ -16,6 +16,7 @@ import { createChat } from './src/chat.js';
 import { createMedia } from './src/media.js';
 import { createWireweave } from './src/wireweave.js';
 import { createEphemeralRelay } from './src/ephemeral-relay.js';
+import { createReactions } from './src/reactions.js';
 
 // A mock relay pool: captures published events and lets a test push events back
 // into a named subscription's onEvent. No network — these are deterministic
@@ -1166,6 +1167,92 @@ function testBansModerationDepth() {
   console.log('  bans moderation depth: pass');
 }
 
+// A mere admin (not the owner) must never be able to ban/timeout/mute the
+// owner or another admin — mirrors the protection roles.js's setRole()
+// already has, closing a real gap where bans.js had none at all.
+async function testBansCannotTargetOwnerOrAdmin() {
+  const owner = newAuth();
+  const admin1 = newAuth();
+  const admin2 = newAuth();
+  const member = newAuth();
+  const serverId = owner.pubkey + ':srv-authz';
+  const pool = mockPool();
+  const roles = createRoles({ relayPool: pool, auth: admin1 });
+  roles.store.set(serverId, { admins: [admin1.pubkey, admin2.pubkey], mods: [] });
+
+  const bansAsAdmin1 = createBans({ relayPool: pool, auth: admin1, roles });
+
+  await assert.rejects(bansAsAdmin1.ban(serverId, owner.pubkey), /owner/i, 'admin cannot ban the owner');
+  await assert.rejects(bansAsAdmin1.timeout(serverId, admin2.pubkey, 10), /admin/i, 'admin cannot timeout another admin');
+  await assert.rejects(bansAsAdmin1.mute(serverId, 'chan1', admin2.pubkey), /admin/i, 'admin cannot mute another admin');
+  // admin CAN still act against a plain member
+  await bansAsAdmin1.ban(serverId, member.pubkey);
+  assert.strictEqual(pool.published.length, 1, 'banning a regular member is allowed and publishes');
+
+  // the owner, by contrast, can act against an admin
+  const ownerRoles = createRoles({ relayPool: pool, auth: owner });
+  ownerRoles.store.set(serverId, { admins: [admin1.pubkey, admin2.pubkey], mods: [] });
+  const bansAsOwner = createBans({ relayPool: pool, auth: owner, roles: ownerRoles });
+  await bansAsOwner.ban(serverId, admin1.pubkey);
+  assert.strictEqual(pool.published.length, 2, 'owner banning an admin is allowed and publishes');
+  console.log('  bans cannot target owner/admin: pass');
+}
+
+// NIP-25 kind:7 reactions: publish, last-write-wins aggregation, unreact via
+// kind:5 deletion, and defense against a stale/out-of-order-delivered reply.
+async function testReactions() {
+  const alice = newAuth();
+  const bob = newAuth();
+  const messageAuthor = newAuth();
+  const pool = mockPool();
+  const targetId = 'msg-' + Math.random().toString(36).slice(2);
+
+  const reactionsAlice = createReactions({ relayPool: pool, auth: alice });
+  const signed = await reactionsAlice.react(targetId, messageAuthor.pubkey, '👍');
+  assert.strictEqual(signed.kind, 7);
+  assert.deepStrictEqual(signed.tags.find((t) => t[0] === 'e'), ['e', targetId]);
+  assert.deepStrictEqual(signed.tags.find((t) => t[0] === 'p'), ['p', messageAuthor.pubkey]);
+  assert.strictEqual(signed.content, '👍');
+  assert.strictEqual(pool.published.length, 1);
+
+  let got = reactionsAlice.getFor(targetId);
+  assert.strictEqual(got.length, 1);
+  assert.strictEqual(got[0].content, '👍');
+  assert.strictEqual(got[0].count, 1);
+  assert.strictEqual(got[0].mine, true, 'alice sees her own reaction as mine');
+
+  // bob reacts with a different emoji — both should now show, counted separately
+  const reactionsBob = createReactions({ relayPool: pool, auth: bob });
+  const bobSigned = await reactionsBob.react(targetId, messageAuthor.pubkey, '🎉');
+  reactionsAlice._applyReaction(bobSigned); // simulate relay echo reaching alice's client
+  got = reactionsAlice.getFor(targetId);
+  assert.strictEqual(got.length, 2, 'two distinct emoji present');
+  const bobEntry = got.find((r) => r.content === '🎉');
+  assert.strictEqual(bobEntry.count, 1);
+  assert.strictEqual(bobEntry.mine, false, 'bobs reaction is not alices');
+
+  // alice changes her reaction (last-write-wins per pubkey+target) — an older
+  // stale replay must not resurrect the earlier emoji count
+  const changed = await reactionsAlice.react(targetId, messageAuthor.pubkey, '❤️');
+  got = reactionsAlice.getFor(targetId);
+  assert.strictEqual(got.find((r) => r.content === '👍'), undefined, 'old emoji replaced, not accumulated');
+  assert.strictEqual(got.find((r) => r.content === '❤️').count, 1);
+
+  const staleReplay = { ...signed, id: 'stale-old-id', created_at: signed.created_at - 10 }; // genuinely predates '❤️'
+  reactionsAlice._applyReaction(staleReplay);
+  got = reactionsAlice.getFor(targetId);
+  assert.strictEqual(got.find((r) => r.content === '👍'), undefined, 'stale out-of-order replay does not resurrect a superseded reaction');
+
+  // unreact publishes a kind:5 deletion and removes the local entry
+  await reactionsAlice.unreact(targetId);
+  const deletionEvent = pool.published[pool.published.length - 1];
+  assert.strictEqual(deletionEvent.kind, 5);
+  assert.deepStrictEqual(deletionEvent.tags.find((t) => t[0] === 'e'), ['e', changed.id]);
+  got = reactionsAlice.getFor(targetId);
+  assert.strictEqual(got.find((r) => r.mine), undefined, 'alice no longer shows as reacted after unreact');
+  console.log('  reactions: pass');
+}
+
 // Offline-first message store (src/message.js): persistence across a fresh
 // MessageBus instance sharing storage+roomKey, offline-queue-then-flush.
 async function testMessageBusOffline() {
@@ -1234,6 +1321,8 @@ async function main() {
   testFrameFragmentation();
   await testProfile();
   testBansModerationDepth();
+  await testBansCannotTargetOwnerOrAdmin();
+  await testReactions();
   await testMessageBusOffline();
   console.log('all pass');
 }
