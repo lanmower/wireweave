@@ -60,6 +60,16 @@ export class NostrAuth extends EventTarget {
     const pk = await this.extension.getPublicKey();
     this.pubkey = pk;
     this.privkey = null;
+    // A locally-generated/imported key from an earlier session may still be
+    // sitting in storage. Without clearing it here, loadFromStorage() on
+    // the NEXT page load would silently restore that stale local identity
+    // and switch the user back to it with no indication anything changed --
+    // two competing identity mechanisms (local key vs. extension) each
+    // persisting independently is exactly what makes "which identity am I
+    // posting as" ambiguous. Switching to extension auth is the definitive
+    // signal the local key is no longer the active identity.
+    this.storage?.removeItem('zn_sk');
+    this.storage?.removeItem('zn_pk');
     this._emit('login', { pubkey: pk });
     return pk;
   }
@@ -89,6 +99,20 @@ export class NostrAuth extends EventTarget {
 
   npubEncode(pubkey = this.pubkey) {
     return pubkey ? this.NT.nip19.npubEncode(pubkey) : '';
+  }
+
+  // There is deliberately no backend/account here -- the private key IS the
+  // identity, so losing it (clearing site data, switching browsers/devices)
+  // is permanent and unrecoverable with no password-reset path even
+  // conceptually possible. Exposing the real nsec (not just the pubkey) is
+  // the only mitigation a static client can offer: it lets a user copy their
+  // own identity out before it's lost, the same way any other Nostr client's
+  // "export/backup key" flow works. Only meaningful when signing with a
+  // locally-held privkey (privkey === null under NIP-07 extension auth,
+  // where the extension itself owns key custody and export).
+  nsecEncode() {
+    if (!this.privkey) return null;
+    return this.NT.nip19.nsecEncode(this.privkey);
   }
 
   _persist(sk, pk) {

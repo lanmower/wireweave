@@ -56,12 +56,46 @@ async function testAuth() {
   const signed = await auth.sign({ kind: 1, created_at: Math.floor(Date.now()/1000), tags: [], content: 'magicwand test' });
   assert.ok(signed.sig);
   assert.ok(NostrTools.verifyEvent(signed));
+
+  // nsecEncode() is the key-backup/export path: the ONLY mitigation a
+  // static, no-backend client can offer for permanent identity loss.
+  // Round-trip it through importKey to prove it is the real, re-importable
+  // secret key, not a decoy.
+  const nsec = auth.nsecEncode();
+  assert.ok(nsec.startsWith('nsec1'), 'exported key is real bech32 nsec');
+  const reimported = new NostrAuth({ nostrTools: NostrTools, storage: store });
+  const { pubkey: reimportedPubkey } = reimported.importKey(nsec);
+  assert.strictEqual(reimportedPubkey, pubkey, 'exported nsec re-imports to the identical identity');
+
   auth.logout();
   assert.ok(!auth.isLoggedIn());
   const auth2 = new NostrAuth({ nostrTools: NostrTools, storage: store });
   auth2.generateKey();
   const loaded = new NostrAuth({ nostrTools: NostrTools, storage: store });
   assert.ok(loaded.loadFromStorage());
+
+  // NIP-07 extension-signed sessions never hold a raw privkey client-side --
+  // nsecEncode() must return null rather than throw or fabricate one, since
+  // there is nothing real to export (the extension owns key custody).
+  const extAuth = new NostrAuth({ nostrTools: NostrTools, extension: { getPublicKey: async () => 'a'.repeat(64) } });
+  await extAuth.loginWithExtension();
+  assert.strictEqual(extAuth.nsecEncode(), null, 'no privkey to export under extension auth');
+
+  // Switching to extension auth while a local key from an earlier session
+  // still sits in storage must clear it -- otherwise a later page reload
+  // would silently restore the stale local key via loadFromStorage() and
+  // switch the user's identity back with zero indication, the exact "which
+  // identity am I posting as" ambiguity between the two auth mechanisms.
+  const mixedStorage = new Map();
+  const mixedStore = { getItem: (k) => mixedStorage.get(k) || null, setItem: (k, v) => mixedStorage.set(k, v), removeItem: (k) => mixedStorage.delete(k) };
+  const localAuth = new NostrAuth({ nostrTools: NostrTools, storage: mixedStore });
+  localAuth.generateKey();
+  assert.ok(mixedStore.getItem('zn_sk'), 'local key persisted to storage');
+  const extAuth2 = new NostrAuth({ nostrTools: NostrTools, storage: mixedStore, extension: { getPublicKey: async () => 'b'.repeat(64) } });
+  await extAuth2.loginWithExtension();
+  assert.strictEqual(mixedStore.getItem('zn_sk'), null, 'switching to extension auth clears the stale local key from storage');
+  const reloadedAfterSwitch = new NostrAuth({ nostrTools: NostrTools, storage: mixedStore });
+  assert.strictEqual(reloadedAfterSwitch.loadFromStorage(), false, 'a page reload after switching to extension auth does not silently resurrect the old local identity');
   console.log('  auth: pass');
 }
 
