@@ -400,6 +400,97 @@ async function testChat() {
   console.log('  chat: pass');
 }
 
+// Deletion must survive loadHistory() being called again (a page reload) --
+// a NIP-09 kind:5 event only tags the deleted event's own id, never the
+// channel, so the check happens client-side against the locally-seen
+// message list, and deletedIds must persist across the whole channel
+// session so a relay replaying the original kind:42 event doesn't resurrect it.
+async function testChatDeletionPersistsAcrossReload() {
+  const author = newAuth();
+  const admin = newAuth();
+  const serverId = admin.pubkey + ':srv-del';
+  const channelId = 'general';
+  const pool = mockPool();
+
+  const chat = createChat({ relayPool: pool, auth: author, getChannelContext: () => ({ channelId, serverId }), isAdmin: () => false });
+  await chat.loadHistory(channelId);
+  const subId = 'chat-' + channelId;
+  pool.feed(subId, { id: 'm1', pubkey: author.pubkey, created_at: 100, tags: [['e', 'irrelevant', '', 'root']], content: 'will be deleted' });
+  pool.eose(subId);
+  assert.strictEqual(chat.messages.length, 1, 'message loaded');
+
+  await chat.deleteMessage('m1');
+  assert.strictEqual(chat.messages.length, 0, 'deleted locally');
+  assert.ok(pool.published.some((e) => e.kind === 5 && e.tags?.[0]?.[1] === 'm1'));
+
+  // simulate a full page reload: fresh Chat instance, fresh loadHistory(),
+  // relay replays BOTH the original kind:42 message AND the kind:5 deletion
+  const reloadedChat = createChat({ relayPool: pool, auth: author, getChannelContext: () => ({ channelId, serverId }), isAdmin: () => false });
+  await reloadedChat.loadHistory(channelId);
+  const subId2 = 'chat-' + channelId;
+  const delSubId2 = 'chat-deletions-' + channelId;
+  pool.feed(delSubId2, { id: 'del1', pubkey: author.pubkey, created_at: 200, tags: [['e', 'm1']], content: 'deleted' });
+  pool.feed(subId2, { id: 'm1', pubkey: author.pubkey, created_at: 100, tags: [['e', 'irrelevant', '', 'root']], content: 'will be deleted' });
+  pool.eose(subId2);
+  assert.strictEqual(reloadedChat.messages.length, 0, 'deleted message does not reappear after reload, even when the relay replays its original kind:42 event');
+
+  // a non-author, non-admin deletion claim is ignored (only removes for the
+  // author/admin case per the existing deleteMessage() authorization)
+  const otherChat = createChat({ relayPool: pool, auth: newAuth(), getChannelContext: () => ({ channelId, serverId }), isAdmin: () => false });
+  await otherChat.loadHistory(channelId);
+  const subId3 = 'chat-' + channelId;
+  const delSubId3 = 'chat-deletions-' + channelId;
+  pool.feed(subId3, { id: 'm2', pubkey: author.pubkey, created_at: 300, tags: [['e', 'irrelevant', '', 'root']], content: 'still here' });
+  pool.eose(subId3);
+  const forger = newAuth();
+  pool.feed(delSubId3, { id: 'del2', pubkey: forger.pubkey, created_at: 400, tags: [['e', 'm2']], content: 'deleted' });
+  assert.strictEqual(otherChat.messages.length, 1, 'a deletion claim from someone who is neither author nor admin is rejected');
+  console.log('  chat deletion persists across reload: pass');
+}
+
+// A plain send() into a channel whose OWN type is 'announcement' must be
+// admin-gated the same way the explicit sendAnnouncement()/{announcement:true}
+// path already was -- the real UI composer never sets that flag, so without
+// checking channelType the admin-only restriction implied by the channel
+// name was never actually enforced for the common case.
+async function testChatAnnouncementChannelTypeGate() {
+  const owner = newAuth();
+  const member = newAuth();
+  const serverId = owner.pubkey + ':srv-announce';
+  const channelId = 'announcements';
+  const pool = mockPool();
+
+  const memberChat = createChat({
+    relayPool: pool, auth: member,
+    getChannelContext: () => ({ channelId, serverId, channelType: 'announcement' }),
+    isAdmin: () => false,
+  });
+  let blocked = false;
+  memberChat.addEventListener('send-blocked', (e) => { if (e.detail?.reason === 'announcement-admin-only') blocked = true; });
+  await memberChat.send('regular members should not be able to post here');
+  assert.strictEqual(pool.published.length, 0, 'non-admin send into an announcement-type channel is rejected even with no explicit announcement flag');
+  assert.ok(blocked, 'send-blocked fires with the announcement-admin-only reason');
+
+  const ownerChat = createChat({
+    relayPool: pool, auth: owner,
+    getChannelContext: () => ({ channelId, serverId, channelType: 'announcement' }),
+    isAdmin: (sid) => sid === serverId,
+  });
+  await ownerChat.send('a real announcement');
+  assert.strictEqual(pool.published.length, 1, 'admin can post in an announcement-type channel with a plain send()');
+  assert.ok(pool.published[0].tags.some((t) => t[0] === 't' && t[1] === 'announcement'), 'the announcement tag is still applied from channelType alone');
+
+  // a normal text-type channel is unaffected
+  const textChat = createChat({
+    relayPool: pool, auth: member,
+    getChannelContext: () => ({ channelId: 'general', serverId, channelType: 'text' }),
+    isAdmin: () => false,
+  });
+  await textChat.send('hello');
+  assert.strictEqual(pool.published.length, 2, 'a plain text channel is never gated by the announcement check');
+  console.log('  chat announcement channel-type gate: pass');
+}
+
 // Chat enforcement: a banned/timed-out sender is rejected at send() (defense
 // in depth beyond the UI-level guard), and both server bans and a viewer's
 // own personal mute list filter incoming history/live messages locally.
@@ -1488,6 +1579,8 @@ async function main() {
   testIceServerOverrides();
   await testDM();
   await testChat();
+  await testChatDeletionPersistsAcrossReload();
+  await testChatAnnouncementChannelTypeGate();
   await testChatBansAndMutesEnforcement();
   await testChatPow();
   await testChannelsMutations();

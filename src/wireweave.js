@@ -49,7 +49,10 @@ export const createWireweave = ({
   let currentChannelId = null;
   const chat = createChat({
     relayPool: pool, auth,
-    getChannelContext: () => ({ channelId: currentChannelId, serverId: servers.currentServerId || '' }),
+    getChannelContext: () => ({
+      channelId: currentChannelId, serverId: servers.currentServerId || '',
+      channelType: channels.channels.find((c) => c.id === currentChannelId)?.type || null
+    }),
     isAdmin: (sid) => roles.isAdmin(sid),
     bans, mutes,
     getEventHash: nostrTools.getEventHash

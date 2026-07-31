@@ -346,7 +346,7 @@ export class VoiceSession extends EventTarget {
   // outbound queue to peers (they playback when their inbound channel drains).
   // ────────────────────────────────────────────────────────────────────────
   requestTransmit() {
-    if (!this.localStream) return false;
+    if (!this.localStream) { this._emit('transmit-denied', { reason: 'no-microphone' }); return false; }
     this._wantsTransmit = true;
     if (!this.anyRemoteSpeaking()) { this.setMuted(false); this._emit('transmit', { mode: 'live' }); return true; }
     // remote busy → buffer locally

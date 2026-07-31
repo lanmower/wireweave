@@ -67,13 +67,22 @@ export class Chat extends EventTarget {
   }
 
   async send(content, { announcement = false, replyTo = null } = {}) {
-    const { channelId, serverId } = this.getChannelContext();
+    const { channelId, serverId, channelType } = this.getChannelContext();
     if (!this.auth.isLoggedIn() || !channelId) return;
     if (this.bans && (this.bans.isBanned(serverId, this.auth.pubkey) || this.bans.isTimedOut(serverId, this.auth.pubkey))) {
       this._emit('send-blocked', { reason: 'banned-or-timed-out' });
       return;
     }
-    if (announcement && !this.isAdmin(serverId)) return;
+    // The caller-supplied `announcement` flag only covers the explicit
+    // sendAnnouncement() path -- a plain send() into a channel whose OWN
+    // type is 'announcement' (the composer's real, ordinary send path) must
+    // be gated the same way, or the admin-only restriction the channel name
+    // implies is never actually enforced for the common case.
+    const isAnnouncementPost = announcement || channelType === 'announcement';
+    if (isAnnouncementPost && !this.isAdmin(serverId)) {
+      this._emit('send-blocked', { reason: 'announcement-admin-only' });
+      return;
+    }
     const trimmed = content.trim(); if (!trimmed) return;
     const retryAfter = this.rateLimitRetryAfterMs();
     if (retryAfter > 0) {
@@ -84,7 +93,7 @@ export class Chat extends EventTarget {
     const chanHex = await hexChannelId(channelId, serverId);
     const tags = [['e', chanHex, '', 'root']];
     if (replyTo?.id) tags.push(['e', replyTo.id, '', 'reply']);
-    if (announcement) tags.push(['t', 'announcement']);
+    if (isAnnouncementPost) tags.push(['t', 'announcement']);
     let template = { kind: 42, created_at: Math.floor(Date.now() / 1000), tags, content: trimmed, pubkey: this.auth.pubkey };
     if (this.powDifficulty > 0 && this.getEventHash) template = minePow(this.getEventHash, template, this.powDifficulty);
     const signed = await this.auth.sign(template);
@@ -97,15 +106,17 @@ export class Chat extends EventTarget {
     if (this.activeChannelId) {
       this.pool.unsubscribe('chat-' + this.activeChannelId);
       this.pool.unsubscribe('chat-live-' + this.activeChannelId);
+      this.pool.unsubscribe('chat-deletions-' + this.activeChannelId);
     }
     this.activeChannelId = channelId;
     this.messages = [];
+    this.deletedIds = this.deletedIds || new Set();
     this._emit('messages', { list: [] });
     const chanHex = await hexChannelId(channelId, serverId);
     const collected = [];
     this.pool.subscribe('chat-' + channelId,
       [{ kinds: [42], '#e': [chanHex], limit: 50 }],
-      (ev) => { if (!this._isBlocked(serverId, ev.pubkey)) collected.push(this._eventToMsg(ev)); },
+      (ev) => { if (!this._isBlocked(serverId, ev.pubkey) && !this.deletedIds.has(ev.id)) collected.push(this._eventToMsg(ev)); },
       () => {
         collected.sort((a, b) => a.timestamp - b.timestamp);
         this.messages = collected;
@@ -113,7 +124,23 @@ export class Chat extends EventTarget {
       });
     this.pool.subscribe('chat-live-' + channelId,
       [{ kinds: [42], '#e': [chanHex], since: Math.floor(Date.now() / 1000) }],
-      (ev) => { if (!this._isBlocked(serverId, ev.pubkey)) this._addMessage(this._eventToMsg(ev)); });
+      (ev) => { if (!this._isBlocked(serverId, ev.pubkey) && !this.deletedIds.has(ev.id)) this._addMessage(this._eventToMsg(ev)); });
+    // A NIP-09 kind:5 deletion only tags the deleted event's own id (no
+    // channel reference), so it can't be relay-side filtered by channel --
+    // the relevance check happens here, client-side, against the locally
+    // cached message list. Applies to both already-loaded and not-yet-seen
+    // messages (deletedIds persists across the whole channel session), so a
+    // deletion that arrives before its target message still takes effect.
+    this.pool.subscribe('chat-deletions-' + channelId,
+      [{ kinds: [5] }],
+      (ev) => {
+        const targetId = (ev.tags || []).find((t) => t[0] === 'e')?.[1];
+        if (!targetId) return;
+        const target = this.messages.find((m) => m.id === targetId);
+        if (target && target.userId !== ev.pubkey && !this.isAdmin(serverId)) return; // only author or admin can delete
+        this.deletedIds.add(targetId);
+        if (target) { this.messages = this.messages.filter((m) => m.id !== targetId); this._emit('messages', { list: this.messages }); }
+      });
   }
 
   async deleteMessage(id) {
@@ -124,6 +151,7 @@ export class Chat extends EventTarget {
     if (!isAuthor && !this.isAdmin(serverId)) throw new Error('Cannot delete: not author or admin');
     const signed = await this.auth.sign({ kind: 5, created_at: Math.floor(Date.now() / 1000), tags: [['e', id]], content: 'deleted' });
     this.pool.publish(signed);
+    (this.deletedIds = this.deletedIds || new Set()).add(id);
     this.messages = this.messages.filter(m => m.id !== id);
     this._emit('messages', { list: this.messages });
   }
