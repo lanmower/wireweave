@@ -76,7 +76,7 @@ export class VoiceSession extends EventTarget {
     fsm, xstate, relayPool, auth, mediaDevices, bans = null, serverId = '',
     onAudioTrack = null, onVideoTrack = null, createPeerConnection = defaultCreatePeerConnection,
     pttMode = true, micSensitivity = SPEAKER_ACTIVE_RMS, noiseSuppression = true,
-    echoCancellation = true, autoGainControl = true, audioQuality = DEFAULT_AUDIO_QUALITY, dtx = true
+    echoCancellation = true, autoGainControl = true, audioQuality = DEFAULT_AUDIO_QUALITY, dtx = true, fec = true
   }) {
     super();
     if (!fsm || !xstate || !relayPool || !auth || !mediaDevices) throw new Error('VoiceSession: missing deps');
@@ -114,6 +114,13 @@ export class VoiceSession extends EventTarget {
     // the actual spec, it is negotiated in the Opus fmtp line).
     this.setAudioQuality(audioQuality);
     this.dtx = !!dtx;
+    // Opus in-band FEC (forward error correction): same fmtp-line mechanism
+    // class as DTX above, negotiated via `useinbandfec=1` rather than an
+    // RTCRtpEncodingParameters field. Materially improves perceived audio
+    // quality on lossy connections by letting the decoder reconstruct lost
+    // packets from redundant data in the following packet, at the cost of a
+    // small bitrate overhead — worthwhile default for voice chat.
+    this.fec = !!fec;
   }
 
   // Live-settable: mic-sensitivity threshold used by the speaker-activity poller.
@@ -121,6 +128,8 @@ export class VoiceSession extends EventTarget {
     if (typeof rms !== 'number' || !(rms > 0)) return;
     this.micSensitivity = rms;
   }
+
+  setFec(on) { this.fec = !!on; }
 
   // Live-settable: push-to-talk vs open-mic mode. Does not itself mute/unmute —
   // it changes what connect() defaults to and what releaseTransmit() restores to.
@@ -697,12 +706,13 @@ export class VoiceSession extends EventTarget {
     }
   }
 
-  // Real DTX (discontinuous transmission / silence suppression) toggle.
-  // DTX is not an RTCRtpEncodingParameters field in the actual WebRTC spec —
-  // it's negotiated per the Opus fmtp SDP line (`usedtx=1`). This mutates the
-  // outgoing SDP's audio m-section fmtp lines for the Opus payload type(s)
-  // found via the SDP itself (matches "opus" case-insensitively, same as the
-  // codec-preference filter in _applyAudioHints), adding/removing usedtx=1.
+  // Real DTX (discontinuous transmission / silence suppression) and FEC
+  // (forward error correction) toggles. Neither is an RTCRtpEncodingParameters
+  // field in the actual WebRTC spec — both are negotiated per the Opus fmtp
+  // SDP line (`usedtx=1` / `useinbandfec=1`). This mutates the outgoing SDP's
+  // audio m-section fmtp lines for the Opus payload type(s) found via the SDP
+  // itself (matches "opus" case-insensitively, same as the codec-preference
+  // filter in _applyAudioHints), adding/removing each param independently.
   _mungeDtx(sdp) {
     if (!sdp) return sdp;
     const lines = sdp.split('\r\n');
@@ -715,8 +725,9 @@ export class VoiceSession extends EventTarget {
     const out = lines.map(line => {
       const m = /^a=fmtp:(\d+)\s+(.*)$/.exec(line);
       if (!m || !opusPts.has(m[1])) return line;
-      const params = m[2].split(';').map(p => p.trim()).filter(p => p && !/^usedtx=/i.test(p));
+      const params = m[2].split(';').map(p => p.trim()).filter(p => p && !/^usedtx=/i.test(p) && !/^useinbandfec=/i.test(p));
       if (this.dtx) params.push('usedtx=1');
+      if (this.fec) params.push('useinbandfec=1');
       return 'a=fmtp:' + m[1] + ' ' + params.join(';');
     });
     return out.join('\r\n');
