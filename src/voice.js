@@ -76,7 +76,8 @@ export class VoiceSession extends EventTarget {
     fsm, xstate, relayPool, auth, mediaDevices, bans = null, serverId = '',
     onAudioTrack = null, onVideoTrack = null, createPeerConnection = defaultCreatePeerConnection,
     pttMode = true, micSensitivity = SPEAKER_ACTIVE_RMS, noiseSuppression = true,
-    echoCancellation = true, autoGainControl = true, audioQuality = DEFAULT_AUDIO_QUALITY, dtx = true, fec = true
+    echoCancellation = true, autoGainControl = true, audioQuality = DEFAULT_AUDIO_QUALITY, dtx = true, fec = true,
+    forceRelay = false
   }) {
     super();
     if (!fsm || !xstate || !relayPool || !auth || !mediaDevices) throw new Error('VoiceSession: missing deps');
@@ -107,6 +108,7 @@ export class VoiceSession extends EventTarget {
     this.noiseSuppression = !!noiseSuppression;
     this.echoCancellation = !!echoCancellation;
     this.autoGainControl = !!autoGainControl;
+    this.deviceId = null;
     // Opus bitrate ladder tier + DTX (discontinuous transmission / silence
     // suppression). Applied for real in _applyAudioHints (bitrate, via the
     // existing RTCRtpSender.setParameters call) and _mungeDtx (DTX, via
@@ -121,7 +123,14 @@ export class VoiceSession extends EventTarget {
     // packets from redundant data in the following packet, at the cost of a
     // small bitrate overhead — worthwhile default for voice chat.
     this.fec = !!fec;
+    // Force-TURN-relay toggle: when true, new peer connections are constrained
+    // to iceTransportPolicy 'relay' (candidates limited to TURN), trading direct-path
+    // latency for IP-address privacy from other participants. Live-settable via
+    // setForceRelay(); like setDtx, only takes effect for new/future connections.
+    this.forceRelay = !!forceRelay;
   }
+
+  setForceRelay(on) { this.forceRelay = !!on; }
 
   // Live-settable: mic-sensitivity threshold used by the speaker-activity poller.
   setMicSensitivity(rms) {
@@ -130,6 +139,17 @@ export class VoiceSession extends EventTarget {
   }
 
   setFec(on) { this.fec = !!on; }
+
+  // Live-settable input-device + processing constraints. Applied on the next
+  // getUserMedia call (join or rejoin) — matches the standard "settings apply
+  // on reconnect" UX pattern also used by setAudioQuality/setDtx; no live
+  // renegotiation of an already-open mic track is attempted.
+  setAudioConstraints({ deviceId, noiseSuppression, autoGainControl, echoCancellation } = {}) {
+    if (deviceId !== undefined) this.deviceId = deviceId || null;
+    if (noiseSuppression !== undefined) this.noiseSuppression = !!noiseSuppression;
+    if (autoGainControl !== undefined) this.autoGainControl = !!autoGainControl;
+    if (echoCancellation !== undefined) this.echoCancellation = !!echoCancellation;
+  }
 
   // Live-settable: push-to-talk vs open-mic mode. Does not itself mute/unmute —
   // it changes what connect() defaults to and what releaseTransmit() restores to.
@@ -185,7 +205,8 @@ export class VoiceSession extends EventTarget {
       let stream = null;
       try {
         stream = await this.md.getUserMedia({ audio: {
-          echoCancellation: this.echoCancellation, noiseSuppression: this.noiseSuppression, autoGainControl: this.autoGainControl
+          echoCancellation: this.echoCancellation, noiseSuppression: this.noiseSuppression, autoGainControl: this.autoGainControl,
+          ...(this.deviceId ? { deviceId: { exact: this.deviceId } } : {})
         } });
       } catch (mediaErr) {
         this._emit('media-warning', { message: 'joined listen-only: ' + mediaErr.message });
@@ -217,6 +238,7 @@ export class VoiceSession extends EventTarget {
       if (epoch !== this._epoch) return;
       this._startHeartbeat();
       this._sfuStart();
+      this._subscribeBanEnforcement();
       this._emit('connected', { roomId: this.roomId, channelName });
     } catch (e) {
       if (epoch !== this._epoch) return;
@@ -245,6 +267,7 @@ export class VoiceSession extends EventTarget {
     if (this.localStream) { this.localStream.getTracks().forEach(t => t.stop()); this.localStream = null; }
     if (this._localListenTrack) { this._localListenTrack.stop(); this._localListenTrack = null; }
     if (this.roomId) { this.pool.unsubscribe('voice-presence-' + this.roomId); this.pool.unsubscribe('voice-signals-' + this.roomId); }
+    this._unsubscribeBanEnforcement();
     this.participants.clear();
     this.roomId = ''; this.channelName = '';
     this.muted = false; this.deafened = false;
@@ -574,6 +597,33 @@ export class VoiceSession extends EventTarget {
       (event) => this._onPresence(event));
   }
 
+  // bans.js publishes ban/timeout/kick as fire-and-forget kind:30078 events with
+  // no direct reach into an already-open WebRTC connection -- _maybeConnect's
+  // isBanned/isTimedOut gate only stops a *future* connection attempt. Without
+  // this, a moderation action taken against someone already in the call has zero
+  // effect until they happen to disconnect and try to rejoin. Mirrors bans.js's
+  // own 'updated' event (fired after every ban/unban/timeout/kick it observes)
+  // to close the live peer connection (or self-disconnect, for a kick/ban
+  // targeting this client) the moment the action lands.
+  _subscribeBanEnforcement() {
+    if (!this.bans || this._banEnforceHandler) return;
+    this._banEnforceHandler = () => this._enforceBans();
+    this.bans.addEventListener('updated', this._banEnforceHandler);
+  }
+
+  _unsubscribeBanEnforcement() {
+    if (this._banEnforceHandler) { this.bans?.removeEventListener('updated', this._banEnforceHandler); this._banEnforceHandler = null; }
+  }
+
+  _enforceBans() {
+    if (!this.bans || !this.serverId) return;
+    const selfBlocked = this.bans.isBanned(this.serverId, this.auth.pubkey) || this.bans.isTimedOut(this.serverId, this.auth.pubkey) || this.bans.isKicked?.(this.serverId, this.auth.pubkey);
+    if (selfBlocked) { this.disconnect(); return; }
+    for (const pk of Array.from(this.peers.keys())) {
+      if (this.bans.isBanned(this.serverId, pk) || this.bans.isTimedOut(this.serverId, pk) || this.bans.isKicked?.(this.serverId, pk)) this._closePeer(pk);
+    }
+  }
+
   _onPresence(event) {
     if (event.pubkey === this.auth.pubkey) return;
     let data; try { data = JSON.parse(event.content); } catch { return; }
@@ -628,7 +678,7 @@ export class VoiceSession extends EventTarget {
 
   _maybeConnect(peerPubkey) {
     if (!peerPubkey || peerPubkey === this.auth.pubkey || this.peers.has(peerPubkey)) return;
-    if (this.bans && this.serverId && (this.bans.isBanned?.(this.serverId, peerPubkey) || this.bans.isTimedOut?.(this.serverId, peerPubkey))) return;
+    if (this.bans && this.serverId && (this.bans.isBanned?.(this.serverId, peerPubkey) || this.bans.isTimedOut?.(this.serverId, peerPubkey) || this.bans.isKicked?.(this.serverId, peerPubkey))) return;
     // Topology gate: only form WebRTC PCs the SFU layout calls for.
     if (!this._sfuShouldHaveConnectionTo(peerPubkey)) return;
     this._cancelReconnect(peerPubkey);
@@ -637,7 +687,7 @@ export class VoiceSession extends EventTarget {
     fsmActor.start();
     const peer = { pc: null, audioEl: null, pendingCandidates: [], bufferedCandidates: [], iceTimer: null, disconnectTimer: null, failCount: 0, state: 'new', fsm: fsmActor, _stallInterval: null, remoteDescSet: false, trackEndedRestart: false };
     this.peers.set(peerPubkey, peer);
-    const pc = this.createPeerConnection({ iceServers: ICE_SERVERS, bundlePolicy: 'max-bundle', iceCandidatePoolSize: 4, iceTransportPolicy: 'all' });
+    const pc = this.createPeerConnection({ iceServers: ICE_SERVERS, bundlePolicy: 'max-bundle', iceCandidatePoolSize: 4, iceTransportPolicy: this.forceRelay ? 'relay' : 'all' });
     peer.pc = pc;
     const isOfferer = this.auth.pubkey > peerPubkey;
     if (isOfferer) {
