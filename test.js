@@ -19,6 +19,7 @@ import { createEphemeralRelay } from './src/ephemeral-relay.js';
 import { createReactions } from './src/reactions.js';
 import { createMutes } from './src/mutes.js';
 import { createForum } from './src/forum.js';
+import { VoiceSession, createVoiceSession, getIceServers as getVoiceIceServers } from './src/voice.js';
 
 // A mock relay pool: captures published events and lets a test push events back
 // into a named subscription's onEvent. No network — these are deterministic
@@ -385,6 +386,13 @@ async function testPagesSanitizer() {
   assert.ok(!/javascript:/i.test(out), 'javascript: url stripped');
   assert.ok(/<b>ok<\/b>/.test(out), 'safe markup preserved');
   console.log('  pages: sanitizer pass');
+}
+
+function testWireweaveDepsGuard() {
+  assert.throws(() => createWireweave({ xstate: {}, storage: memStore() }), /wireweave: nostrTools required/, 'missing nostrTools throws');
+  assert.throws(() => createWireweave({ nostrTools: NostrTools, storage: memStore() }), /wireweave: xstate required/, 'missing xstate throws');
+  assert.throws(() => createWireweave({ nostrTools: NostrTools, xstate: {} }), /wireweave: storage required \(no localStorage/, 'missing storage throws the localStorage-adapter-shaped message');
+  console.log('  wireweave deps guard: pass');
 }
 
 async function testCompose() {
@@ -1572,6 +1580,75 @@ async function testReactions() {
 
 // Offline-first message store (src/message.js): persistence across a fresh
 // MessageBus instance sharing storage+roomKey, offline-queue-then-flush.
+function testVoiceSessionDepsGuard() {
+  const xstate = { createMachine: () => ({}), createActor: () => ({}) };
+  const fsm = { voiceMachine: {} };
+  const pool = mockPool();
+  const auth = newAuth();
+  const md = { getUserMedia: async () => { throw new Error('no mic in test'); } };
+  const base = { fsm, xstate, relayPool: pool, auth, mediaDevices: md };
+  for (const missingKey of ['fsm', 'xstate', 'relayPool', 'auth', 'mediaDevices']) {
+    const opts = { ...base, [missingKey]: undefined };
+    assert.throws(() => new VoiceSession(opts), /VoiceSession: missing deps/, 'missing ' + missingKey + ' throws');
+  }
+  const session = new VoiceSession(base);
+  assert.ok(session instanceof VoiceSession);
+  assert.strictEqual(createVoiceSession(base) instanceof VoiceSession, true, 'createVoiceSession factory returns a real VoiceSession');
+  console.log('  voice deps guard: pass');
+}
+
+function testVoiceSessionSetters() {
+  const xstate = { createMachine: () => ({}), createActor: () => ({}) };
+  const fsm = { voiceMachine: {} };
+  const pool = mockPool();
+  const auth = newAuth();
+  const md = { getUserMedia: async () => { throw new Error('no mic in test'); } };
+  const session = new VoiceSession({ fsm, xstate, relayPool: pool, auth, mediaDevices: md });
+
+  assert.strictEqual(session.pttMode, true, 'pttMode defaults true');
+  assert.strictEqual(session.dtx, true, 'dtx defaults true');
+  assert.strictEqual(session.fec, true, 'fec defaults true');
+  assert.strictEqual(session.audioQuality, 'high', 'audioQuality defaults to high tier');
+
+  session.setPttMode(false);
+  assert.strictEqual(session.pttMode, false, 'setPttMode(false) applies');
+
+  session.setDtx(false);
+  assert.strictEqual(session.dtx, false, 'setDtx(false) applies');
+
+  session.setFec(false);
+  assert.strictEqual(session.fec, false, 'setFec(false) applies');
+
+  const before = session.micSensitivity;
+  session.setMicSensitivity(-1);
+  assert.strictEqual(session.micSensitivity, before, 'setMicSensitivity ignores a non-positive value');
+  session.setMicSensitivity('nope');
+  assert.strictEqual(session.micSensitivity, before, 'setMicSensitivity ignores a non-numeric value');
+  session.setMicSensitivity(0.09);
+  assert.strictEqual(session.micSensitivity, 0.09, 'setMicSensitivity applies a valid value');
+
+  session.setAudioQuality('ultra-max-unknown-tier');
+  assert.strictEqual(session.audioQuality, 'high', 'unknown quality tier falls back to default');
+  session.setAudioQuality('low');
+  assert.strictEqual(session.audioQuality, 'low', 'known quality tier applies');
+
+  assert.strictEqual(session.muted, false, 'muted defaults false pre-connect');
+  session.setMuted(true);
+  assert.strictEqual(session.muted, true, 'setMuted(true) applies with no localStream');
+  session.toggleMic();
+  assert.strictEqual(session.muted, false, 'toggleMic flips muted with no localStream');
+
+  console.log('  voice setters: pass');
+}
+
+function testVoiceIceServers() {
+  const original = getVoiceIceServers();
+  assert.ok(original.length > 0, 'voice.js ships a real default ICE server list');
+  assert.ok(original.some((s) => /^stun:/.test(s.urls)), 'default list includes at least one STUN server');
+  assert.ok(original.some((s) => /^turns?:/.test(s.urls)), 'default list includes at least one TURN server (symmetric-NAT fallback)');
+  console.log('  voice ice servers: pass');
+}
+
 async function testMessageBusOffline() {
   const store = memStore();
   const bus1 = createMessageBus({ storage: store, roomKey: 'test-room' });
@@ -1607,6 +1684,7 @@ async function main() {
   testServers();
   testMediaPure();
   await testPagesSanitizer();
+  testWireweaveDepsGuard();
   await testCompose();
   await testDataSession();
   await testDataSessionCreatePeerConnection();
@@ -1647,6 +1725,9 @@ async function main() {
   await testForum();
   await testReactions();
   await testMessageBusOffline();
+  testVoiceSessionDepsGuard();
+  testVoiceSessionSetters();
+  testVoiceIceServers();
   console.log('all pass');
 }
 

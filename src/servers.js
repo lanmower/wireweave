@@ -3,7 +3,9 @@ import { safeSetItem } from './safe-storage.js';
 export class Servers extends EventTarget {
   constructor({ relayPool, auth, storage, onSwitch = null }) {
     super();
-    if (!relayPool || !auth || !storage) throw new Error('Servers: deps required');
+    if (!relayPool) throw new Error('Servers: relayPool required');
+    if (!auth) throw new Error('Servers: auth required');
+    if (!storage) throw new Error('Servers: storage required (no localStorage in this env — pass a {getItem,setItem,removeItem} adapter)');
     this.pool = relayPool; this.auth = auth; this.storage = storage; this.onSwitch = onSwitch;
     this.servers = []; this.currentServerId = null;
   }
