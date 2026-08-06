@@ -1,6 +1,6 @@
 {
   "name": "wireweave",
-  "version": "0.3.63",
+  "version": "0.3.64",
   "description": "nostr + webrtc voice + data SDK. networking layer for 247420 projects.",
   "type": "module",
   "main": "./src/index.js",
