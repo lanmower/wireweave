@@ -93,7 +93,7 @@ export class Pages extends EventTarget {
           const data = JSON.parse(event.content);
           const pages = this.store.get(serverId) || new Map();
           if (data.deleted) pages.delete(slug);
-          else pages.set(slug, { slug, title: data.title || slug, html: sanitize(data.html || ''), updatedAt: event.created_at });
+          else pages.set(slug, { slug, title: data.title || slug, html: sanitize(data.html || ''), updatedAt: event.created_at, author: event.pubkey });
           this.store.set(serverId, pages);
           this.dispatchEvent(new CustomEvent('updated', { detail: { serverId, pages: this.getPages(serverId) } }));
         } catch {}
@@ -111,7 +111,7 @@ export class Pages extends EventTarget {
     const signed = await this.auth.sign({ kind: 30078, created_at: Math.floor(Date.now() / 1000), tags: [['d', this._key(serverId, slug)]], content: JSON.stringify({ title, html: safe }) });
     this.pool.publish(signed);
     const pages = this.store.get(serverId) || new Map();
-    pages.set(slug, { slug, title, html: safe, updatedAt: Math.floor(Date.now() / 1000) });
+    pages.set(slug, { slug, title, html: safe, updatedAt: Math.floor(Date.now() / 1000), author: this.auth.pubkey });
     this.store.set(serverId, pages);
     this.dispatchEvent(new CustomEvent('updated', { detail: { serverId, pages: this.getPages(serverId) } }));
   }
