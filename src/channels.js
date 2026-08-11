@@ -69,9 +69,11 @@ export class Channels extends EventTarget {
     name = (name || '').trim();
     if (!name) throw new Error('channel name cannot be empty');
     if (this.channels.some(c => c.name === name)) throw new Error('a channel with that name already exists');
-    this.channels = [...this.channels, { id: 'ch-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6), name, type, categoryId, position: this.channels.length }];
+    const created = { id: 'ch-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6), name, type, categoryId, position: this.channels.length };
+    this.channels = [...this.channels, created];
     await this._publish();
     this._emit('updated', { channels: this.channels, categories: this.categories });
+    return created;
   }
 
   async rename(id, name) {
