@@ -99,6 +99,62 @@ function makeVs() {
   check('array-shaped urls field with a TURN entry inside it is correctly recognized', warnings.length === 0);
 }
 
+// Case 6 (defense-in-depth, added after an independent adversarial review found
+// setForceRelay()'s warning is bypassable via `new VoiceSession({forceRelay:true})`
+// -- the constructor sets this.forceRelay directly with no check, and the original
+// fix only guarded setForceRelay() itself, not the actual PC-creation site).
+// _maybeConnect (voice.js:727-731) now independently re-derives relayRequested from
+// forceRelay && hasTurnServer() at the actual point iceTransportPolicy is set, rather
+// than trusting a possibly-bypassed forceRelay flag alone. Drive the REAL
+// _maybeConnect end to end (not a proxy check) via the constructor-bypass path the
+// review found: no setForceRelay() call, forceRelay set directly, then a real peer
+// connect attempt, and inspect what iceTransportPolicy the real createPeerConnection
+// injection point actually received.
+{
+  setIceServers([{ urls: 'stun:stun.l.google.com:19302' }]); // STUN-only, matches production shipped default
+  let capturedConfig = null;
+  const vs = new VoiceSession({
+    fsm, xstate, relayPool: fakePool, auth: fakeAuth, mediaDevices: fakeMediaDevices,
+    forceRelay: true, // constructor-bypass path: no setForceRelay() call anywhere
+    createPeerConnection: (cfg) => { capturedConfig = cfg; return {
+      connectionState: 'new', iceConnectionState: 'new', iceGatheringState: 'new', signalingState: 'stable',
+      addTransceiver() { return { receiver: {}, sender: {} }; }, getTransceivers() { return []; },
+      getSenders() { return []; }, getReceivers() { return []; },
+      createDataChannel() { return { close() {}, send() {} }; },
+      onconnectionstatechange: null, onicecandidate: null, onicegatheringstatechange: null,
+      ontrack: null, ondatachannel: null,
+      restartIce() {}, createOffer() { return Promise.resolve({ sdp: 'v=0\r\n' }); },
+      setLocalDescription() { return Promise.resolve(); },
+      close() {},
+    }; }
+  });
+  vs.roomId = 'test-room'; // _maybeConnect needs a roomId-bearing session state, not a full connect() flow
+  vs._maybeConnect('a'.repeat(64)); // peer with a different pubkey than fakeAuth's, passes the self-check
+  check('real _maybeConnect with constructor-bypassed forceRelay=true and no TURN configured falls back to iceTransportPolicy:all (the original silent-dead-end bug stays closed even via this bypass)', capturedConfig && capturedConfig.iceTransportPolicy === 'all');
+}
+{
+  setIceServers([{ urls: 'turn:example-turn-provider.test:3478', username: 'u', credential: 'p' }]);
+  let capturedConfig = null;
+  const vs = new VoiceSession({
+    fsm, xstate, relayPool: fakePool, auth: fakeAuth, mediaDevices: fakeMediaDevices,
+    forceRelay: true,
+    createPeerConnection: (cfg) => { capturedConfig = cfg; return {
+      connectionState: 'new', iceConnectionState: 'new', iceGatheringState: 'new', signalingState: 'stable',
+      addTransceiver() { return { receiver: {}, sender: {} }; }, getTransceivers() { return []; },
+      getSenders() { return []; }, getReceivers() { return []; },
+      createDataChannel() { return { close() {}, send() {} }; },
+      onconnectionstatechange: null, onicecandidate: null, onicegatheringstatechange: null,
+      ontrack: null, ondatachannel: null,
+      restartIce() {}, createOffer() { return Promise.resolve({ sdp: 'v=0\r\n' }); },
+      setLocalDescription() { return Promise.resolve(); },
+      close() {},
+    }; }
+  });
+  vs.roomId = 'test-room';
+  vs._maybeConnect('a'.repeat(64));
+  check('real _maybeConnect with constructor-bypassed forceRelay=true and a real TURN server present correctly still uses iceTransportPolicy:relay (fix does not break the legitimate case)', capturedConfig && capturedConfig.iceTransportPolicy === 'relay');
+}
+
 // Restore the real module state so this script has no side effect on any process
 // that might import voice.js again afterward in the same run (defensive cleanup).
 setIceServers(originalIceServers);

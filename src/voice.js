@@ -724,7 +724,12 @@ export class VoiceSession extends EventTarget {
     fsmActor.start();
     const peer = { pc: null, audioEl: null, pendingCandidates: [], bufferedCandidates: [], iceTimer: null, disconnectTimer: null, connectTimer: null, failCount: 0, state: 'new', fsm: fsmActor, _stallInterval: null, remoteDescSet: false, trackEndedRestart: false };
     this.peers.set(peerPubkey, peer);
-    const pc = this.createPeerConnection({ iceServers: ICE_SERVERS, bundlePolicy: 'max-bundle', iceCandidatePoolSize: 4, iceTransportPolicy: this.forceRelay ? 'relay' : 'all' });
+    // Re-check hasTurnServer() here rather than trust setForceRelay()'s own warning
+    // alone -- this is the actual point of consequence (where iceTransportPolicy is
+    // set), so it stays correct even if forceRelay is ever set another way (directly
+    // via the constructor, a future setter) that bypasses setForceRelay()'s check.
+    const relayRequested = this.forceRelay && hasTurnServer();
+    const pc = this.createPeerConnection({ iceServers: ICE_SERVERS, bundlePolicy: 'max-bundle', iceCandidatePoolSize: 4, iceTransportPolicy: relayRequested ? 'relay' : 'all' });
     peer.pc = pc;
     // Watchdog: if this pc hasn't reached 'connected' within CONNECT_TIMEOUT, force
     // the same recovery path a real 'failed' event would take, instead of relying on
