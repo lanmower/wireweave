@@ -1,19 +1,24 @@
-// ICE servers. STUN handles same-LAN / non-symmetric-NAT cases; TURN is required
-// when both peers sit behind symmetric or restricted-cone NAT (typical home routers,
-// most carrier-grade NAT, corporate networks). The legacy openrelay.metered.ca
-// hostname was retired; the current public-credential endpoint is global.relay.metered.ca.
-// We include UDP, TCP, and TLS variants so at least one path survives strict egress filtering.
+// ICE servers. STUN-only: TURN is required for symmetric/restricted-cone NAT pairs
+// (typical home routers, carrier-grade NAT, corporate networks) but no working free
+// static-credential public TURN provider exists anymore -- confirmed via live
+// RTCPeerConnection relay tests against 10+ candidates (metered.ca's current
+// global.relay.metered.ca and its newer staticauth HMAC scheme, numb.viagenie.ca,
+// several ~2013-era demo servers) plus research into every major current provider
+// (Metered, ExpressTURN, Cloudflare Calls, TurnRelay, elixir-webrtc/rel): all now
+// require account signup, several explicitly citing abuse prevention as why static
+// credentials were retired. This repo already hit this exact dead-end once before
+// (see git history for the openrelay.metered.ca -> global.relay.metered.ca swap,
+// which has since also died) -- it's a recurring pattern with free-tier TURN, not a
+// one-off broken link. A real fix needs either a paid/account-gated TURN provider
+// with a credential-issuing proxy (Cloudflare's own docs require keeping the API
+// token server-side, which this repo's no-backend design doesn't have) or a
+// self-hosted relay -- deliberately not done here; peers needing TURN (symmetric
+// NAT/CGNAT on both sides) will fail to connect until one of those is set up.
 const DEFAULT_ICE_SERVERS = [
   { urls: 'stun:stun.l.google.com:19302' },
   { urls: 'stun:stun1.l.google.com:19302' },
   { urls: 'stun:stun.cloudflare.com:3478' },
-  { urls: 'stun:global.stun.twilio.com:3478' },
-  { urls: 'turn:global.relay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' },
-  { urls: 'turn:global.relay.metered.ca:80?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' },
-  { urls: 'turn:global.relay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' },
-  { urls: 'turns:global.relay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' },
-  // Legacy hostname kept as a low-priority fallback in case some deployments still resolve it.
-  { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' }
+  { urls: 'stun:global.stun.twilio.com:3478' }
 ];
 let ICE_SERVERS = DEFAULT_ICE_SERVERS;
 export const setIceServers = (list) => { if (Array.isArray(list) && list.length) ICE_SERVERS = list; };
