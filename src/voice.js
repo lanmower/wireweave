@@ -47,6 +47,7 @@ const HUB_REL_ADVANTAGE = 0.25; // challenger must beat incumbent by ≥25% to t
 const SPEAKER_ACTIVE_RMS = 0.045;     // RMS threshold above which a stream counts as "speaking"
 const SPEAKER_HOLD_MS = 350;          // tail: stay marked speaking this long after last frame > threshold
 const SPEAKER_POLL_MS = 80;           // analyzer poll cadence
+const LEVEL_METER_CEILING = 0.35;     // raw RMS mapped to a full 0-1 meter bar (empirical loud-speech ceiling)
 const QUEUE_MAX_SEGMENT_MS = 30000;   // hard cap per segment
 const QUEUE_MIME_PREFS = ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus', 'audio/ogg'];
 const DC_LABEL = 'wireweave-queue';
@@ -362,6 +363,15 @@ export class VoiceSession extends EventTarget {
       if (active) a.lastActive = now;
       const stillSpeaking = active || (now - a.lastActive) < SPEAKER_HOLD_MS;
       if (stillSpeaking !== a.speaking) { a.speaking = stillSpeaking; this._setSpeaking(key, stillSpeaking); }
+      if (key === 'local') {
+        // Normalized 0-1 level for a live VAD meter UI, distinct from the speaking
+        // boolean above -- LEVEL_METER_CEILING is an empirical loud-speech RMS
+        // ceiling (raw RMS rarely exceeds ~0.3-0.4 even shouting close to a mic),
+        // not a physical constant; scaling against it keeps normal speech visible
+        // in the meter instead of pinned near the bottom of a 0-1 bar.
+        const level = Math.max(0, Math.min(1, rms / LEVEL_METER_CEILING));
+        this._emit('local-level', { level, rms });
+      }
     }
     this._maybeAutoTransmit();
   }
