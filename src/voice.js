@@ -23,6 +23,18 @@ const PRESENCE_EXPIRY = 300000;
 const HEARTBEAT = 5000;        // tight cadence: heartbeat carries election scores + reflexive addr
 const STALL_CHECK = 5000;
 const DISCONNECT_GRACE = 8000;
+// A peer whose pc never leaves 'new'/'connecting' (offer sent but the answer or
+// the answerer's ICE candidates never arrive back over the Nostr relay -- dropped
+// signal, relay hiccup, STUN gather that never completes) produces zero WebRTC
+// state-change events: onconnectionstatechange only fires on connected/
+// disconnected/failed/closed, none of which a stuck-at-'new' pc ever reaches on
+// its own. Every existing recovery path (_doIceRestart, _checkStall,
+// _scheduleReconnect) is gated on one of those events firing, so without this
+// watchdog such a peer hangs forever. Set equal to DISCONNECT_GRACE: comfortably
+// above real STUN/TURN gather + multi-relay Nostr round-trip latency, while
+// keeping worst-case perceived stall bounded to the same window as the existing
+// disconnected-branch recovery.
+const CONNECT_TIMEOUT = 8000;
 const HUB_HYSTERESIS_MS = 8000; // minimum hold-time before re-election can replace incumbent
 const HUB_REL_ADVANTAGE = 0.25; // challenger must beat incumbent by ≥25% to take over
 
@@ -685,10 +697,18 @@ export class VoiceSession extends EventTarget {
     const fsmActor = this.xstate.createActor(this.fsm.peerMachine);
     fsmActor.subscribe((snap) => { const p = this.peers.get(peerPubkey); if (p) p.state = snap.value; });
     fsmActor.start();
-    const peer = { pc: null, audioEl: null, pendingCandidates: [], bufferedCandidates: [], iceTimer: null, disconnectTimer: null, failCount: 0, state: 'new', fsm: fsmActor, _stallInterval: null, remoteDescSet: false, trackEndedRestart: false };
+    const peer = { pc: null, audioEl: null, pendingCandidates: [], bufferedCandidates: [], iceTimer: null, disconnectTimer: null, connectTimer: null, failCount: 0, state: 'new', fsm: fsmActor, _stallInterval: null, remoteDescSet: false, trackEndedRestart: false };
     this.peers.set(peerPubkey, peer);
     const pc = this.createPeerConnection({ iceServers: ICE_SERVERS, bundlePolicy: 'max-bundle', iceCandidatePoolSize: 4, iceTransportPolicy: this.forceRelay ? 'relay' : 'all' });
     peer.pc = pc;
+    // Watchdog: if this pc hasn't reached 'connected' within CONNECT_TIMEOUT, force
+    // the same recovery path a real 'failed' event would take, instead of relying on
+    // a browser state transition that may never come for a peer stuck at 'new'.
+    peer.connectTimer = setTimeout(() => {
+      peer.connectTimer = null;
+      if (pc.connectionState === 'connected') return;
+      this._doIceRestart(peer, peerPubkey, fsmActor);
+    }, CONNECT_TIMEOUT);
     const isOfferer = this.auth.pubkey > peerPubkey;
     if (isOfferer) {
       if (this.localStream) this.localStream.getTracks().forEach(t => pc.addTransceiver(t, { direction: 'sendrecv', streams: [this.localStream] }));
@@ -742,9 +762,15 @@ export class VoiceSession extends EventTarget {
         peer.failCount = 0; this._cancelReconnect(peerPubkey);
         if (fsmActor.getSnapshot().can({ type: 'recv_answer' })) fsmActor.send({ type: 'recv_answer' });
         if (peer.disconnectTimer) { clearTimeout(peer.disconnectTimer); peer.disconnectTimer = null; }
+        if (peer.connectTimer) { clearTimeout(peer.connectTimer); peer.connectTimer = null; }
         this._applyAudioHints(pc);
       }
-      if (pc.connectionState === 'disconnected') { fsmActor.send({ type: 'disconnect' }); peer.disconnectTimer = setTimeout(() => this._doIceRestart(peer, peerPubkey, fsmActor), DISCONNECT_GRACE); }
+      // Clear connectTimer here too: a pc can go straight 'new' -> 'disconnected' in some
+      // browsers without ever reporting 'connected'. Without this, connectTimer and the
+      // disconnectTimer armed below would both independently call _doIceRestart on the
+      // same peer -- a double-fire that double-increments failCount and can double-send
+      // ICE restart offers / double-schedule the close+backoff reconnect.
+      if (pc.connectionState === 'disconnected') { if (peer.connectTimer) { clearTimeout(peer.connectTimer); peer.connectTimer = null; } fsmActor.send({ type: 'disconnect' }); peer.disconnectTimer = setTimeout(() => this._doIceRestart(peer, peerPubkey, fsmActor), DISCONNECT_GRACE); }
       if (pc.connectionState === 'failed') this._doIceRestart(peer, peerPubkey, fsmActor);
       if (pc.connectionState === 'closed') { this._closePeer(peerPubkey); if (this.sfu.hub === peerPubkey) this._sfuOnHubLost(); }
       if (pc.connectionState === 'failed' && this.sfu.hub === peerPubkey) this._sfuOnHubLost();
@@ -819,9 +845,19 @@ export class VoiceSession extends EventTarget {
   _doIceRestart(peer, peerPubkey, fsmActor) {
     const pc = peer.pc;
     if (peer.disconnectTimer) { clearTimeout(peer.disconnectTimer); peer.disconnectTimer = null; }
+    if (peer.connectTimer) { clearTimeout(peer.connectTimer); peer.connectTimer = null; }
     peer.failCount++;
     if (peer.failCount <= 1 && this.auth.pubkey > peerPubkey) {
       fsmActor.send({ type: 'restart' }); pc.restartIce();
+      // Re-arm the watchdog for the restarted attempt -- only the offerer retries in
+      // place (the answerer branch below closes+reschedules immediately, so there is
+      // no live peer/pc left to re-arm a timer against). If this restarted offer also
+      // goes unanswered, the same bounded fallback applies again.
+      peer.connectTimer = setTimeout(() => {
+        peer.connectTimer = null;
+        if (pc.connectionState === 'connected') return;
+        this._doIceRestart(peer, peerPubkey, fsmActor);
+      }, CONNECT_TIMEOUT);
       pc.createOffer({ iceRestart: true }).then(o => { o.sdp = this._mungeDtx(o.sdp); return pc.setLocalDescription(o).then(() => this._publishSignal(peerPubkey, 'offer', o)); }).catch(() => this._closePeer(peerPubkey));
     } else { this._closePeer(peerPubkey); this._scheduleReconnect(peerPubkey, peer.failCount); }
   }
@@ -868,6 +904,7 @@ export class VoiceSession extends EventTarget {
     const peer = this.peers.get(peerPubkey); if (!peer) return;
     if (peer.iceTimer) clearTimeout(peer.iceTimer);
     if (peer.disconnectTimer) clearTimeout(peer.disconnectTimer);
+    if (peer.connectTimer) clearTimeout(peer.connectTimer);
     if (peer._stallInterval) clearInterval(peer._stallInterval);
     try { peer.dc?.close(); } catch {}
     try { peer.pc?.close(); } catch {}
