@@ -248,20 +248,22 @@ real-relay phases tolerate single-relay flake via the multi-relay `RELAYS`
 array; `compose`/`data` tests skip when `xstate` is absent (not installed in
 CI) — that is expected, not a failure.
 
-## Resident untracked malware files — scan periodically, not just on install
+## HiddenSpawn malware was committed to history (removed, but scan periodically)
 
 A HiddenSpawn-class malware dropper (obfuscated `_0x`-hex payload appended
-after a file's real content, usually disguised as build config like
-`tailwind.config.mjs`/`flatspace.config.mjs`) can sit in the working tree
-for months completely undetected if it's never `git`-tracked — `git status`/
-`git log`/PR review show nothing for a file version control never saw. One
-was found and quarantined in this repo's root on 2026-08-25 (filesystem
-birth date 2026-05-09, ~3.5 months resident, unrelated to any tool run that
-day — the actual npm `flatspace` package was independently verified clean).
-Run `scan_deps` (see the gm skill's Section 1a) periodically on this repo,
-not only when a fresh `npm install` happens — this attack class requires no
-install action to appear, so gating the scan on that misses a file that's
-simply been sitting there.
+after a file's real content) was found in `flatspace.config.mjs` on
+2026-08-25 — NOT sitting untracked, it was smuggled directly into commit
+`087de8d` (2026-08-11) alongside a genuine, small `channels.js` fix, plus a
+full-file `.gitignore` rewrite that silently dropped `.env`/`.env.*` from
+the ignore list (a credential-exfiltration setup). A normal `git log`/PR
+skim shows a plausible commit message and file list; only reading the full
+diff content (or `scan_deps`) surfaces the payload. Removed via `git rebase
+-i` (edit stop at the bad commit, clean replacement content, legitimate
+changes preserved) + `git push --force-with-lease`, after a local backup
+branch and full test-suite re-run. Full incident detail: recall memory. Run
+`scan_deps` (gm skill Section 1a) periodically on this repo, not only on a
+fresh `npm install` — and never trust a commit's stated subject as evidence
+of its actual full diff.
 
 ## test.js size cap
 
