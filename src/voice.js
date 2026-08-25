@@ -23,6 +23,7 @@ const DEFAULT_ICE_SERVERS = [
 let ICE_SERVERS = DEFAULT_ICE_SERVERS;
 export const setIceServers = (list) => { if (Array.isArray(list) && list.length) ICE_SERVERS = list; };
 export const getIceServers = () => ICE_SERVERS.slice();
+const hasTurnServer = () => ICE_SERVERS.some(s => (Array.isArray(s.urls) ? s.urls : [s.urls]).some(u => typeof u === 'string' && (u.startsWith('turn:') || u.startsWith('turns:'))));
 
 const PRESENCE_EXPIRY = 300000;
 const HEARTBEAT = 5000;        // tight cadence: heartbeat carries election scores + reflexive addr
@@ -148,7 +149,16 @@ export class VoiceSession extends EventTarget {
     this.forceRelay = !!forceRelay;
   }
 
-  setForceRelay(on) { this.forceRelay = !!on; }
+  setForceRelay(on) {
+    this.forceRelay = !!on;
+    // iceTransportPolicy:'relay' restricts ICE candidate gathering to TURN-sourced
+    // relay candidates only -- STUN never produces those, so with no TURN server
+    // configured (see DEFAULT_ICE_SERVERS' file-header comment) this setting is a
+    // guaranteed, permanent connection failure rather than the "route via relay
+    // for IP privacy" behavior it's meant to provide. Warn now, at the point the
+    // setting is changed, rather than let it silently doom every future connect().
+    if (this.forceRelay && !hasTurnServer()) this._emit('media-warning', { message: 'Force TURN is enabled but no TURN server is configured -- voice connections will fail to establish. Disable Force TURN or configure a TURN server via setIceServers().' });
+  }
 
   // Live-settable: mic-sensitivity threshold used by the speaker-activity poller.
   setMicSensitivity(rms) {
