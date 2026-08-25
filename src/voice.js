@@ -764,13 +764,14 @@ export class VoiceSession extends EventTarget {
         if (peer.disconnectTimer) { clearTimeout(peer.disconnectTimer); peer.disconnectTimer = null; }
         if (peer.connectTimer) { clearTimeout(peer.connectTimer); peer.connectTimer = null; }
         this._applyAudioHints(pc);
+        this._setConnectionQuality(peerPubkey, 'good');
       }
       // Clear connectTimer here too: a pc can go straight 'new' -> 'disconnected' in some
       // browsers without ever reporting 'connected'. Without this, connectTimer and the
       // disconnectTimer armed below would both independently call _doIceRestart on the
       // same peer -- a double-fire that double-increments failCount and can double-send
       // ICE restart offers / double-schedule the close+backoff reconnect.
-      if (pc.connectionState === 'disconnected') { if (peer.connectTimer) { clearTimeout(peer.connectTimer); peer.connectTimer = null; } fsmActor.send({ type: 'disconnect' }); peer.disconnectTimer = setTimeout(() => this._doIceRestart(peer, peerPubkey, fsmActor), DISCONNECT_GRACE); }
+      if (pc.connectionState === 'disconnected') { if (peer.connectTimer) { clearTimeout(peer.connectTimer); peer.connectTimer = null; } fsmActor.send({ type: 'disconnect' }); peer.disconnectTimer = setTimeout(() => this._doIceRestart(peer, peerPubkey, fsmActor), DISCONNECT_GRACE); this._setConnectionQuality(peerPubkey, 'poor'); }
       if (pc.connectionState === 'failed') this._doIceRestart(peer, peerPubkey, fsmActor);
       if (pc.connectionState === 'closed') { this._closePeer(peerPubkey); if (this.sfu.hub === peerPubkey) this._sfuOnHubLost(); }
       if (pc.connectionState === 'failed' && this.sfu.hub === peerPubkey) this._sfuOnHubLost();
@@ -847,6 +848,7 @@ export class VoiceSession extends EventTarget {
     if (peer.disconnectTimer) { clearTimeout(peer.disconnectTimer); peer.disconnectTimer = null; }
     if (peer.connectTimer) { clearTimeout(peer.connectTimer); peer.connectTimer = null; }
     peer.failCount++;
+    this._setConnectionQuality(peerPubkey, 'poor');
     if (peer.failCount <= 1 && this.auth.pubkey > peerPubkey) {
       fsmActor.send({ type: 'restart' }); pc.restartIce();
       // Re-arm the watchdog for the restarted attempt -- only the offerer retries in
@@ -893,6 +895,19 @@ export class VoiceSession extends EventTarget {
     }
   }
 
+  // participants is keyed by shortId ('nostr-' + first 12 hex chars of the
+  // full pubkey, see _handlePresence/line ~643), while every WebRTC/timer
+  // callback only has the full peerPubkey in scope -- bridge the two
+  // keyspaces here rather than inline at each call site. A no-op if the
+  // participant already left (shortId deleted) or was never a remote peer.
+  _setConnectionQuality(peerPubkey, quality) {
+    const shortId = 'nostr-' + peerPubkey.slice(0, 12);
+    const p = this.participants.get(shortId);
+    if (!p || p.connectionQuality === quality) return;
+    p.connectionQuality = quality;
+    this._emit('participants', { list: this.getParticipants() });
+  }
+
   async _publishSignal(toPubkey, type, data) {
     if (!this.auth.pubkey || !this.roomId) return;
     const d = 'zellous-rtc:' + this.roomId + ':' + this.auth.pubkey + ':' + toPubkey + ':' + type + ':' + (type === 'ice' ? Date.now() : 'sdp');
@@ -917,7 +932,15 @@ export class VoiceSession extends EventTarget {
 
   _cancelReconnect(pk) { const e = this.retrySchedule[pk]; if (e) { clearTimeout(e.timer); delete this.retrySchedule[pk]; } }
   _scheduleReconnect(pk, attempt) {
-    const a = attempt || 0; if (a >= 6) return;
+    const a = attempt || 0;
+    if (a >= 6) {
+      // Retries genuinely exhausted -- distinct from 'peer-closed' (which also
+      // fires on a normal clean leave via _closePeer) so a consumer can tell
+      // "gave up after 6 attempts" apart from "they left the call".
+      this._setConnectionQuality(pk, 'failed');
+      this._emit('peer-connect-failed', { peerPubkey: pk, attempts: a });
+      return;
+    }
     this._cancelReconnect(pk);
     const timer = setTimeout(() => { delete this.retrySchedule[pk]; if (!this.peers.has(pk) && this.roomId) this._maybeConnect(pk); }, Math.min(2 ** a * 2000, 30000));
     this.retrySchedule[pk] = { attempt: a, timer };
