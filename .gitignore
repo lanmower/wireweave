@@ -2,8 +2,6 @@ node_modules/
 docs/
 *.log
 .DS_Store
-.env
-.env.*
 package-lock.json
 # >>> gm managed (do not edit between markers)
 .gm-stop-verified
@@ -46,3 +44,4 @@ dist/
 *.br.meta
 *.gz
 *.gz.meta
+config.bat

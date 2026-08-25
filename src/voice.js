@@ -251,11 +251,19 @@ export class VoiceSession extends EventTarget {
       // Local speaker-activity detection needs to keep listening even while muted
       // (VAD mode auto-unmutes ON speech, so it can't rely on the transmit-gated
       // track to hear that speech in the first place). Clone the raw audio track
-      // — a clone's `enabled` is independent of the original — and keep the clone
-      // always enabled purely for local analysis; it is never sent to peers.
+      // — a clone's `enabled` is independent of the original ONCE SET, but
+      // MediaStreamTrack.clone() inherits the source's CURRENT enabled state at
+      // clone time (confirmed live: track.enabled=false then .clone() produces an
+      // already-disabled clone, not a fresh enabled:true one) — so cloning after
+      // line above sets the original to !pttMode (false in the default PTT-starts-
+      // muted case) previously born the clone already silenced, permanently, since
+      // nothing else ever touches it. Force enabled=true explicitly right after
+      // cloning, independent of the original's state, so local analysis never goes
+      // silent regardless of clone-order or mute state; it is never sent to peers.
       if (this.localStream) {
         const track = this.localStream.getAudioTracks()[0];
         this._localListenTrack = track ? track.clone() : null;
+        if (this._localListenTrack) this._localListenTrack.enabled = true;
         const listenStream = this._localListenTrack ? new MediaStream([this._localListenTrack]) : this.localStream;
         this._attachAnalyzer('local', listenStream);
       }
@@ -313,6 +321,11 @@ export class VoiceSession extends EventTarget {
     if (this.muted === next) return;
     this.muted = next;
     if (this.localStream) this.localStream.getAudioTracks().forEach(t => t.enabled = !this.muted);
+    // Defensive re-assert: _localListenTrack must never be silenced by mute state
+    // (see connect()'s own comment on why) -- this setter never intentionally
+    // touches it, but re-asserting here costs nothing and makes the invariant
+    // self-healing rather than solely dependent on connect()'s one-time clone-order fix.
+    if (this._localListenTrack) this._localListenTrack.enabled = true;
     const local = this.participants.get('local'); if (local) local.isMuted = this.muted;
     if (this.muted) this._localActivityClear();
     this._emit('mic', { muted: this.muted });
