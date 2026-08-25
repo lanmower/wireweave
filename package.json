@@ -28,11 +28,6 @@
     "./dm": "./src/dm.js",
     "./ephemeral-relay": "./src/ephemeral-relay.js"
   },
-  "files": [
-    "src",
-    "README.md",
-    "LICENSE"
-  ],
   "scripts": {
     "test": "node test.js",
     "site:build": "npx --yes flatspace@latest build"
@@ -61,8 +56,5 @@
   "devDependencies": {
     "nostr-tools": "^2.23.12",
     "ws": "^8.21.1"
-  },
-  "publishConfig": {
-    "access": "public"
   }
 }

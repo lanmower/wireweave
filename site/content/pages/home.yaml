@@ -11,8 +11,7 @@ hero:
     - { label: "data" }
     - { label: "sdk" }
   ctas:
-    - { label: "view on npm", href: "https://www.npmjs.com/package/wireweave", primary: true }
-    - { label: "github", href: "https://github.com/AnEntrypoint/wireweave" }
+    - { label: "github", href: "https://github.com/AnEntrypoint/wireweave", primary: true }
 features:
   heading: "Why wireweave"
   items:
@@ -30,7 +29,7 @@ install:
   body: "wireweave ships as a single esm package. every subsystem is its own export so you tree-shake whatever you do not use. each module is also exported via subpath: wireweave/relay-pool, wireweave/voice, wireweave/data, wireweave/chat, etc."
   code:
     - { kind: "cmt", text: "# install" }
-    - { kind: "cmd", text: "npm i wireweave nostr-tools" }
+    - { kind: "cmd", text: "npm i github:AnEntrypoint/wireweave nostr-tools" }
     - { kind: "cmt", text: "" }
     - { kind: "cmt", text: "# one-liner setup (browser)" }
     - { kind: "cmd", text: "import { createWireweave } from 'wireweave';" }
@@ -92,23 +91,23 @@ api:
 modules:
   heading: Modules
   items:
-    - { name: "voice", sub: "perfect negotiation, ice restart, track-stall detection, capacity-weighted hub election.", meta: "rtc + sfu", href: "https://github.com/AnEntrypoint/wireweave/blob/master/src/voice.js" }
-    - { name: "data", sub: "binary p2p RTCDataChannel — ordered, ArrayBuffer-shaped. game frames, file sync, no media, no mic.", meta: "p2p binary", href: "https://github.com/AnEntrypoint/wireweave/blob/master/src/data.js" }
-    - { name: "chat", sub: "public channels, replies, reactions. kinds 42 + 7.", meta: "nip-28", href: "https://github.com/AnEntrypoint/wireweave/blob/master/src/chat.js" }
-    - { name: "servers", sub: "community events, invite links, owner rename, delete.", meta: "nip-72", href: "https://github.com/AnEntrypoint/wireweave/blob/master/src/servers.js" }
-    - { name: "channels", sub: "parameterized replaceable channel list per server.", meta: "30078", href: "https://github.com/AnEntrypoint/wireweave/blob/master/src/channels.js" }
-    - { name: "roles", sub: "role events keyed by server id + pubkey.", meta: "owner / admin / mod", href: "https://github.com/AnEntrypoint/wireweave/blob/master/src/roles.js" }
-    - { name: "bans", sub: "signed ban events with expiry. kick-from-voice on top.", meta: "ban / timeout / kick", href: "https://github.com/AnEntrypoint/wireweave/blob/master/src/bans.js" }
-    - { name: "settings", sub: "bitrate, embed allowlist, arbitrary key/value.", meta: "per-server", href: "https://github.com/AnEntrypoint/wireweave/blob/master/src/settings.js" }
-    - { name: "media", sub: "nip-98 auth upload to any blossom server. cdn mirror list.", meta: "blossom", href: "https://github.com/AnEntrypoint/wireweave/blob/master/src/media.js" }
-    - { name: "auth", sub: "extension first, local nsec fallback, stored in provided storage.", meta: "nip-07 / nsec", href: "https://github.com/AnEntrypoint/wireweave/blob/master/src/auth.js" }
-    - { name: "relay-pool", sub: "multi-relay fallback, reconnect, verifyEvent hook, pluggable WebSocket.", meta: "transport", href: "https://github.com/AnEntrypoint/wireweave/blob/master/src/relay-pool.js" }
-    - { name: "fsm", sub: "voice, peer, relay, sfu, camera — every state machine exported.", meta: "xstate v5", href: "https://github.com/AnEntrypoint/wireweave/blob/master/src/fsm.js" }
+    - { name: "voice", sub: "perfect negotiation, ice restart, track-stall detection, capacity-weighted hub election.", meta: "rtc + sfu", href: "https://github.com/AnEntrypoint/wireweave/blob/main/src/voice.js" }
+    - { name: "data", sub: "binary p2p RTCDataChannel — ordered, ArrayBuffer-shaped. game frames, file sync, no media, no mic.", meta: "p2p binary", href: "https://github.com/AnEntrypoint/wireweave/blob/main/src/data.js" }
+    - { name: "chat", sub: "public channels, replies, reactions. kinds 42 + 7.", meta: "nip-28", href: "https://github.com/AnEntrypoint/wireweave/blob/main/src/chat.js" }
+    - { name: "servers", sub: "community events, invite links, owner rename, delete.", meta: "nip-72", href: "https://github.com/AnEntrypoint/wireweave/blob/main/src/servers.js" }
+    - { name: "channels", sub: "parameterized replaceable channel list per server.", meta: "30078", href: "https://github.com/AnEntrypoint/wireweave/blob/main/src/channels.js" }
+    - { name: "roles", sub: "role events keyed by server id + pubkey.", meta: "owner / admin / mod", href: "https://github.com/AnEntrypoint/wireweave/blob/main/src/roles.js" }
+    - { name: "bans", sub: "signed ban events with expiry. kick-from-voice on top.", meta: "ban / timeout / kick", href: "https://github.com/AnEntrypoint/wireweave/blob/main/src/bans.js" }
+    - { name: "settings", sub: "bitrate, embed allowlist, arbitrary key/value.", meta: "per-server", href: "https://github.com/AnEntrypoint/wireweave/blob/main/src/settings.js" }
+    - { name: "media", sub: "nip-98 auth upload to any blossom server. cdn mirror list.", meta: "blossom", href: "https://github.com/AnEntrypoint/wireweave/blob/main/src/media.js" }
+    - { name: "auth", sub: "extension first, local nsec fallback, stored in provided storage.", meta: "nip-07 / nsec", href: "https://github.com/AnEntrypoint/wireweave/blob/main/src/auth.js" }
+    - { name: "relay-pool", sub: "multi-relay fallback, reconnect, verifyEvent hook, pluggable WebSocket.", meta: "transport", href: "https://github.com/AnEntrypoint/wireweave/blob/main/src/relay-pool.js" }
+    - { name: "fsm", sub: "voice, peer, relay, sfu, camera — every state machine exported.", meta: "xstate v5", href: "https://github.com/AnEntrypoint/wireweave/blob/main/src/fsm.js" }
 quickstart:
   heading: Quick start
   lines:
     - { kind: "cmt", text: "# install" }
-    - { kind: "cmd", text: "npm i wireweave nostr-tools" }
+    - { kind: "cmd", text: "npm i github:AnEntrypoint/wireweave nostr-tools" }
     - { kind: "cmt", text: "" }
     - { kind: "cmt", text: "# source" }
     - { kind: "cmd", text: "git clone https://github.com/AnEntrypoint/wireweave.git" }

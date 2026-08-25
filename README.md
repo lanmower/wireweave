@@ -8,10 +8,10 @@ serverless nostr + webrtc voice + binary-data SDK. the networking layer for 2474
 - **data** — peer-to-peer binary `RTCDataChannel` over the same nostr signaling. game frames, structured payloads, anything `Uint8Array`-shaped.
 
 site: https://anentrypoint.github.io/wireweave/  
-npm: https://www.npmjs.com/package/wireweave
+source: https://github.com/AnEntrypoint/wireweave
 
 ```
-npm i wireweave
+npm i github:AnEntrypoint/wireweave
 ```
 
 ## one-liner setup
