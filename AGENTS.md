@@ -113,6 +113,28 @@ installed in this environment so a full `DataSession` can't be instantiated
 here; the script drives the real `frame.js` primitives directly, the exact
 functions `sendUnreliable`/the unreliable `onmessage` handler call).
 
+## Voice peer connect-timeout watchdog (src/voice.js)
+
+A peer whose `RTCPeerConnection` never leaves `connectionState` `'new'`/`'connecting'`
+(offer sent but the answer or the answerer's ICE candidates never arrive back over
+the Nostr relay) fires zero `onconnectionstatechange` events, so `_doIceRestart`/
+`_checkStall`/`_scheduleReconnect` — every one of them gated on that event firing —
+never engage and the peer hangs forever; `heal()` doesn't cover it either (it only
+handles `disconnected`/`failed`/`closed`). `peer.connectTimer` (`CONNECT_TIMEOUT`,
+8000ms, matches `DISCONNECT_GRACE`) is armed in `_maybeConnect` right after `pc`
+creation and calls `_doIceRestart` if still not connected when it fires. It MUST be
+cleared on both the `'connected'` AND `'disconnected'` branches of
+`onconnectionstatechange` — clearing only on `'connected'` (as a naive version once
+did) leaves a `pc` that goes straight `new` -> `disconnected` with both `connectTimer`
+and the `DISCONNECT_GRACE` `disconnectTimer` independently calling `_doIceRestart`,
+double-incrementing `failCount` and double-sending ICE-restart offers. It re-arms only
+inside `_doIceRestart`'s offerer-retry branch (`peer.failCount <= 1 && isOfferer`) —
+the answerer branch closes the peer immediately via `_closePeer` (which clears every
+per-peer timer including `connectTimer`), so there is no live peer left to re-arm
+against. Verified live via `scratch-verify-connect-watchdog.mjs` (real `VoiceSession`
++ real xstate actor, controllable fake `RTCPeerConnection` driving the actual
+production `onconnectionstatechange`/`_doIceRestart`/`_closePeer` code).
+
 ## RelayPool publish budget (rate/abuse backstop)
 
 `RelayPool.publish()` is gated by a shared token bucket (`publishBudget`
@@ -190,73 +212,33 @@ handler); a message that still fails stays queued for the next flush.
 
 ## Ephemeral in-process relay for deterministic tests (src/ephemeral-relay.js)
 
-`testRelay()`'s round-trip depends on real public relays (see the
-main-relay-flake section above) — that's intentional (masks single-relay
-flake for THAT assertion) but means it can't give a deterministic,
-CI-uptime-independent witness on its own. `EphemeralRelay` is a real (not
-mocked) minimal NIP-01 relay — a genuine `ws` `WebSocketServer` that
-actually parses/validates (`verifyEvent`)/stores/relays real signed events
-over EVENT/REQ/CLOSE/EOSE/OK, naive in-memory filter matching
-(kinds/authors/#tag/since/until — the shapes `RelayPool` actually sends),
-`port:0` for an OS-assigned ephemeral port. `testEphemeralRelay()` and
-`testRelayPublishBudget()` in test.js spin one up in-process per test, real
-`RelayPool`+`NostrAuth` client against it, real signature-verified
-publish/subscribe/receive — deterministic and CI-independent while staying
-inside the repo's real-services-only test discipline (a real relay process,
-just short-lived and unpersisted, is not a mock).
+`EphemeralRelay` is a real (not mocked) minimal NIP-01 relay on `port:0`,
+used by `testEphemeralRelay()`/`testRelayPublishBudget()` for a
+deterministic, CI-uptime-independent witness that stays real-services-only.
+Detail: recall memory (drain fired this session; if not yet landed, re-fire
+via `memorize-fire` and check `.gm/memories/`).
 
 ## Relay health scoring, auto-rotation, persistence (src/relay-pool.js)
 
-`RelayHealth` tracks a 0-100 `rank` per relay URL, a weighted blend
-(`computeRank`) of EWMA-smoothed connect latency, EWMA-smoothed EOSE
-response latency, and a real attempt/success uptime ratio. `rank` is
-recomputed on EVERY signal that can change it, including
-`recordConnectAttempt()` itself — a relay that never once succeeds in
-connecting (e.g. genuinely unreachable) still needs its rank to fall below
-the neutral 50 default purely from repeated failed attempts, since it will
-never fire `recordConnectLatency`/`recordSustainedConnection`/
-`recordEoseLatency`, the only other rank-recomputing call sites. Forgetting
-this on `recordConnectAttempt` (a real bug found+fixed 2026-07-19: it only
-incremented `attempts` without recomputing `rank`) silently freezes a
-never-connecting relay's rank at 50 forever, invisible to both
-`healthReport()`'s ordering and `_maybeRotate()`'s gap check.
+`RelayHealth` tracks a 0-100 EWMA-blended `rank` per relay URL and drives
+`_maybeRotate()` auto-rotation away from unhealthy relays, persisted via
+storage-injection (key `ww_relay_health`) and exposed through `debug.js`'s
+registry. Two real bugs fixed 2026-07-19 here (rank not recomputed on a
+never-connecting relay's `recordConnectAttempt`; rotation only evaluated on
+the `sustained`-disconnect branch, never the never-connected branch) are the
+non-obvious load-bearing detail. Full mechanism + rotation thresholds +
+test coverage: recall memory (drain fired this session; if not yet landed,
+re-fire via `memorize-fire` and check `.gm/memories/`).
 
-`_maybeRotate()` is evaluated from `ws.onclose` on EVERY close, not only the
-`sustained` (open >5s then dropped) branch — a real bug found+fixed
-2026-07-19: it was called only inside the `sustained` branch, so a relay
-that fails to connect at all (the `else` branch — exactly the
-"consistently unhealthy" case auto-rotation exists to route around) never
-triggered rotation evaluation no matter how many times it failed. Rotation
-itself still requires: `urls.length > MIN_ACTIVE_RELAYS` (2), the worst
-active relay has `attempts >= 2` (a real sample floor), a fallback
-candidate with `attempts > 0` (an untested rank-50-neutral candidate never
-displaces a relay with a real track record), and a real rank gap
-`>= ROTATE_GAP` (20) between best-candidate and worst-active.
+## No npm publishing — GitHub-only distribution
 
-Health persists via the existing storage-injection pattern (same shape as
-`NostrAuth`'s constructor `storage` option), `safeSetItem`
-(`src/safe-storage.js`)-guarded, key `ww_relay_health`, debounced 2s. A
-fresh `RelayPool` sharing that storage object loads prior scores
-(`RelayHealth.fromJSON`) instead of starting neutral — this is the actual
-cross-session persistence mechanism, exercised by
-`testHealthPersistsAcrossReload()`.
-
-Each `RelayPool` instance self-registers into `debug.js`'s plain
-module-level `registry` Map (not window-gated, so it works identically
-under Node/test as in a browser) under an incrementing key
-(`relayPool`, `relayPool2`, ...) via `debug.register`/`debug.deregister`,
-exposing `healthReport()` (best-rank-first) for a debug panel — or
-`debug.get('relayPool').healthReport()` from any consumer, including a
-test — to read live. `disconnect()` deregisters; a pool that's merely
-garbage-collected without an explicit `disconnect()` call leaks its debug
-key, matching the same discipline as its socket/timer cleanup.
-
-Live-witnessed real coverage (test.js, against `src/ephemeral-relay.js`'s
-real relay and a real currently-unbound local TCP port for the unhealthy
-case — genuine ECONNREFUSED, not a mock): `testRelayHealthScoring`,
-`testUnhealthyRelayLowerScore`, `testAutoRotateAwayFromUnhealthy`,
-`testNoRotateToUntestedCandidate`, `testHealthPersistsAcrossReload`,
-`testDebugPanelExposesHealth`.
+There is no npm-publish workflow in this repo (removed 2026-08-25 — was
+`.github/workflows/publish.yml`, auto version-bumping and `npm publish`ing
+on every push to `main`). wireweave is installed directly from GitHub
+(`npm i github:AnEntrypoint/wireweave`), matching how spoint already
+consumes it as a git submodule. Do not re-add npm-publish CI, an
+`NPM_TOKEN` secret reference, or restore `publishConfig`/`files` to
+`package.json` — those were deliberately removed, not an oversight.
 
 ## CI
 
@@ -265,6 +247,21 @@ case — genuine ECONNREFUSED, not a mock): `testRelayHealthScoring`,
 real-relay phases tolerate single-relay flake via the multi-relay `RELAYS`
 array; `compose`/`data` tests skip when `xstate` is absent (not installed in
 CI) — that is expected, not a failure.
+
+## Resident untracked malware files — scan periodically, not just on install
+
+A HiddenSpawn-class malware dropper (obfuscated `_0x`-hex payload appended
+after a file's real content, usually disguised as build config like
+`tailwind.config.mjs`/`flatspace.config.mjs`) can sit in the working tree
+for months completely undetected if it's never `git`-tracked — `git status`/
+`git log`/PR review show nothing for a file version control never saw. One
+was found and quarantined in this repo's root on 2026-08-25 (filesystem
+birth date 2026-05-09, ~3.5 months resident, unrelated to any tool run that
+day — the actual npm `flatspace` package was independently verified clean).
+Run `scan_deps` (see the gm skill's Section 1a) periodically on this repo,
+not only when a fresh `npm install` happens — this attack class requires no
+install action to appear, so gating the scan on that misses a file that's
+simply been sitting there.
 
 ## test.js size cap
 
